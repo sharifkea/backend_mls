@@ -1,0 +1,16 @@
+python -m venv venv
+source venv/Scripts/activate
+pip install fastapi uvicorn websockets pydantic
+
+
+uvicorn main:app --reload
+http://127.0.0.1:8000/docs
+
+#Install the required dependency
+pip install pyhpke
+
+
+dactivate
+
+from mls_stuff.Enums import CipherSuite
+
