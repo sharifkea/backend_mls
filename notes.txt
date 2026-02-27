@@ -2,6 +2,7 @@ python -m venv venv
 source venv/Scripts/activate
 pip install fastapi uvicorn websockets pydantic
 
+pip install -r requirements.txt
 
 uvicorn main:app --reload
 http://127.0.0.1:8000/docs
@@ -14,3 +15,66 @@ dactivate
 
 from mls_stuff.Enums import CipherSuite
 
+#GitHub
+# 1. Initialize git (if not already a git repo)
+git init
+
+# 2. Add all files
+git add .
+
+# 3. First commit
+git commit -m "Initial commit – MLS backend project"
+
+# 4. Create the remote repository on GitHub (using GitHub CLI – easiest)
+# First install gh if you don't have it: https://cli.github.com/
+gh repo create backend_mls --public --source=. --remote=origin --push
+
+# Alternative without GitHub CLI (manual)
+git remote add origin https://github.com/sharifkea/backend_mls.git
+git branch -M main
+git push -u origin main
+
+
+
+
+curl -X POST "http://localhost:8000/users" -H "Content-Type: application/json" -d '{"username": "alice", "password": "secret"}'
+
+{"status":"registered",
+"user_id":"ec063427-7f31-4370-a392-58925bc1986d"}
+
+curl -X POST "http://localhost:8000/login" \
+-H "Content-Type: application/x-www-form-urlencoded" \
+-d "username=alice&password=secret"
+
+{"status":"logged in",
+"user_id":"7f009848-2a11-4998-905e-02ba969b9bf5",
+"access_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiN2YwMDk4NDgtMmExMS00OTk4LTkwNWUtMDJiYTk2OWI5YmY1IiwiZXhwIjoxNzcyMjIxNTUzfQ.nCFvBjzqjooXgC2Bo0OAGbOQK7LZNs6w7eepB7b7K3o",
+"token_type":"bearer"
+
+curl -X POST "http://localhost:8000/key_packages/ec063427-7f31-4370-a392-58925bc1986d" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary "@alice_keypackage.bin"
+
+{"status":"uploaded","key_package_id":"b2abe672-e226-4218-9345-b5b53ec4203a",
+"ref_hash":"be985d6bc0a603a952bf41b3e53f496149019ee4d3150da3a8f8d754f90f3db7"}
+
+curl -X DELETE "http://localhost:8000/users/b0e004de-c5e3-4df2-92d5-007ca45ca699" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjQ2MWYzMWYtNDgwYy00MTYwLWI4NWUtYWE0NmNlNmQ2NTBhIiwiZXhwIjoxNzcyMjIyMjU1fQ.XK3R_DHtgAywi2rKklG0sziqLnDOFYx5_XVZiGE4Iq0"
+
+{"status":"deleted","user_id":"ec063427-7f31-4370-a392-58925bc1986d"}
+
+ alice_priv_bytes, alice_kp_bytes = GeneratKeyPackage(test_user)
+    #test_user = f"testuser-{uuid4().hex[:8]}"
+
+
+
+    uploaded_ref_hash = test_upload_keypackage(test_user, alice_kp_bytes)
+
+    if uploaded_ref_hash:
+        fetched_data = test_get_latest_keypackage(test_user)
+
+        if fetched_data:
+            test_mark_used(uploaded_ref_hash)
+            test_cleanup()
+
+    print("\n=== Test finished ===")

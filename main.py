@@ -1,12 +1,33 @@
 # main.py (FastAPI)
-from fastapi import FastAPI, Body, HTTPException, status
+from fastapi import FastAPI, Body, HTTPException, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from uuid import UUID, uuid4
+from datetime import datetime, timedelta
+import jwt
 from fastapi.responses import Response
 from typing import Dict
-from uuid import UUID
 from database import db
 import hashlib  # for ref_hash computation
 
 app = FastAPI()
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# JWT config (replace with your secret)
+JWT_SECRET = "your-secret-key"  # Change to strong secret in .env
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+class UserDelete(BaseModel):
+    user_id: UUID
 
 @app.on_event("startup")
 async def startup():
@@ -15,6 +36,64 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await db.close()
+
+@app.post("/users")
+async def register_user(user: UserCreate):
+    password_hash = pwd_context.hash(user.password)
+    print(f"Registering user: {user.username}, hashed password: {password_hash}")
+    async with db.connection() as conn:
+        user_id = await conn.fetchval(
+            """
+            INSERT INTO users (username, password_hash, created_at, last_active)
+            VALUES ($1, $2, NOW(), NOW())
+            RETURNING user_id
+            """,
+            user.username, password_hash
+        )
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Username already exists")
+    return {"status": "registered", "user_id": str(user_id)}
+
+@app.post("/login")
+async def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
+    async with db.connection() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT user_id, password_hash
+            FROM users
+            WHERE username = $1
+            """,
+            form_data.username
+        )
+        if not row or not pwd_context.verify(form_data.password, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        token = jwt.encode(
+            {"user_id": str(row["user_id"]), "exp": datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)},
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM
+        )
+
+    return {"status": "logged in", "user_id": str(row["user_id"]), "access_token": token, "token_type": "bearer"}
+
+@app.delete("/users/{user_id}")
+async def delete_user(user_id: UUID, token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if str(payload["user_id"]) != str(user_id):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    async with db.connection() as conn:
+        await conn.execute(
+            """
+            DELETE FROM users
+            WHERE user_id = $1
+            """,
+            str(user_id)
+        )
+    return {"status": "deleted", "user_id": str(user_id)}
 
 @app.post("/key_packages/{user_id}")
 async def upload_keypackage(user_id: UUID, key_package: bytes = Body(...)):
