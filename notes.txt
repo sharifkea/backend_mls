@@ -7,6 +7,9 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 http://127.0.0.1:8000/docs
 
+uvicorn authentication_service:app --reload --port 1337 --host 127.0.0.1
+uvicorn delivery_service:app --reload --port 1338 --host 127.0.0.1
+
 #Install the required dependency
 pip install pyhpke
 
@@ -79,19 +82,21 @@ curl -X DELETE "http://localhost:8000/users/230957e0-31cd-435b-857b-657a2b11e052
 
     print("\n=== Test finished ===")
 
-
-test_db_connection()
-    test_user = "alice"
-    user_id = test_user_registration(test_user,"1234")
-    if user_id:
-        user_id, token = test_user_login(test_user,"1234")
-        if user_id and token:
-           
-            user_privet, kp_user=GeneratKeyPackage(test_user)
-            ref_hash, key_package_id = test_upload_keypackage(user_id, kp_user)
-            if ref_hash:
-                latest_kp = test_get_latest_keypackage(user_id)
-                if latest_kp:
-                    test_mark_used(ref_hash)
-                    test_cleanup()
-                    bool_ret=test_delete_user(user_id, token)
+print("✅ Welcome ready to send to Alice!")
+        
+        # Now group contains NEW epoch secret for epoch 1!
+        print(f"\nCurrent epoch: {group['epoch']}")
+        print(f"Current epoch secret: {group['epoch_secret'][:16].hex()}...")
+                
+        # Bob sends encrypted message (Bob is index 0)
+        bob_msg, key, nonce = send_encrypted_message(
+            group, 0, bob_priv_bytes, 
+            "Hello Alice! This is ENCRYPTED with real epoch secret!", 
+            group["epoch_secret"]  # Pass the actual epoch secret!
+        )
+        
+        # Alice receives and decrypts
+        received = receive_encrypted_message(
+            group, bob_msg, 0, group["epoch_secret"]
+        )
+    
