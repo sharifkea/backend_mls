@@ -19,3 +19,92 @@ CREATE TABLE key_packages (
 CREATE INDEX idx_key_packages_user_id ON key_packages(user_id);
 CREATE INDEX idx_key_packages_expires_at ON key_packages(expires_at);
 CREATE INDEX idx_key_packages_unused ON key_packages(used) WHERE used = FALSE;
+
+-- 1. Insert new KeyPackage (returns the inserted ID or error)
+CREATE OR REPLACE FUNCTION insert_key_package(
+    p_user_id       uuid,
+    p_key_package   bytea,
+    p_ref_hash      bytea,
+    p_expires_at    timestamptz
+) RETURNS uuid AS $$
+DECLARE
+    v_id uuid;
+BEGIN
+    INSERT INTO key_packages (
+        user_id, key_package, ref_hash, expires_at, created_at, used
+    )
+    VALUES (
+        p_user_id,
+        p_key_package,
+        p_ref_hash,
+        p_expires_at,
+        NOW(),
+        FALSE
+    )
+    RETURNING id INTO v_id;
+
+    RETURN v_id;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'KeyPackage with ref_hash % already exists for user %', p_ref_hash, p_user_id;
+    WHEN others THEN
+        RAISE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 2. Get latest unused KeyPackage for a user
+CREATE OR REPLACE FUNCTION get_latest_unused_key_package(
+    p_user_id uuid
+) RETURNS TABLE (
+    id          uuid,
+    ref_hash    bytea,
+    key_package bytea,
+    created_at  timestamptz,
+    expires_at  timestamptz
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        id, ref_hash, key_package, created_at, expires_at
+    FROM key_packages
+    WHERE user_id = p_user_id
+      AND used = FALSE
+      AND expires_at > NOW()
+    ORDER BY created_at DESC
+    LIMIT 1;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 3. Mark KeyPackage as used (by ref_hash)
+CREATE OR REPLACE FUNCTION mark_key_package_used(
+    p_ref_hash bytea
+) RETURNS boolean AS $$
+DECLARE
+    v_updated boolean := FALSE;
+BEGIN
+    UPDATE key_packages
+    SET used = TRUE
+    WHERE ref_hash = p_ref_hash
+      AND used = FALSE
+    RETURNING TRUE INTO v_updated;
+
+    RETURN v_updated;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 4. Cleanup expired or used packages (can be called by cron)
+CREATE OR REPLACE FUNCTION cleanup_old_key_packages() RETURNS integer AS $$
+DECLARE
+    v_count integer;
+BEGIN
+    DELETE FROM key_packages
+    WHERE expires_at < NOW()
+       OR used = TRUE;
+
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;

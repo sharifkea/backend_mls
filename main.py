@@ -22,10 +22,15 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+
+
 class UserCreate(BaseModel):
     username: str
     password: str
 
+class MarkUsedRequest(BaseModel):
+    ref_hash: str
+    
 class UserDelete(BaseModel):
     user_id: UUID
 
@@ -76,25 +81,28 @@ async def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
 
     return {"status": "logged in", "user_id": str(row["user_id"]), "access_token": token, "token_type": "bearer"}
 
-@app.delete("/users/{user_id}")
-async def delete_user(user_id: UUID, token: str = Depends(oauth2_scheme)):
+@app.post("/key_packages/mark-used")
+async def mark_keypackage_used(request: MarkUsedRequest):
+    """
+    Mark a KeyPackage as used (by its ref_hash in hex).
+    """
+    ref_hash_hex = request.ref_hash
+    print(f"Marking KeyPackage as used with ref_hash: {ref_hash_hex}")
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if str(payload["user_id"]) != str(user_id):
-            raise HTTPException(status_code=401, detail="Unauthorized")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        ref_hash = bytes.fromhex(ref_hash_hex)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid hex ref_hash")
 
     async with db.connection() as conn:
-        await conn.execute(
-            """
-            DELETE FROM users
-            WHERE user_id = $1
-            """,
-            str(user_id)
+        updated = await conn.fetchval(
+            "SELECT mark_key_package_used($1)",
+            ref_hash
         )
-    return {"status": "deleted", "user_id": str(user_id)}
+        if not updated:
+            raise HTTPException(status_code=404, detail="KeyPackage not found or already used")
 
+        return {"status": "marked as used"}
+    
 @app.post("/key_packages/{user_id}")
 async def upload_keypackage(user_id: UUID, key_package: bytes = Body(...)):
     """
@@ -138,25 +146,7 @@ async def get_latest_unused_keypackage(user_id: UUID):
         )
 
 
-@app.post("/key_packages/mark_used")
-async def mark_keypackage_used(ref_hash_hex: str = Body(...)):
-    """
-    Mark a KeyPackage as used (by its ref_hash in hex).
-    """
-    try:
-        ref_hash = bytes.fromhex(ref_hash_hex)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid hex ref_hash")
 
-    async with db.connection() as conn:
-        updated = await conn.fetchval(
-            "SELECT mark_key_package_used($1)",
-            ref_hash
-        )
-        if not updated:
-            raise HTTPException(status_code=404, detail="KeyPackage not found or already used")
-
-        return {"status": "marked as used"}
 
 
 @app.post("/cleanup")
@@ -168,6 +158,25 @@ async def cleanup_expired_packages():
     async with db.connection() as conn:
         count = await conn.fetchval("SELECT cleanup_old_key_packages()")
         return {"cleaned": count}
+    
+@app.delete("/users/{user_id}")
+async def delete_user(user_id: UUID, token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if str(payload["user_id"]) != str(user_id):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    async with db.connection() as conn:
+        await conn.execute(
+            """
+            DELETE FROM users
+            WHERE user_id = $1
+            """,
+            str(user_id)
+        )
+    return {"status": "deleted", "user_id": str(user_id)}
     
 @app.get("/test-db")
 async def test_db():

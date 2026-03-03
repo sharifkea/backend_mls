@@ -58,8 +58,8 @@ curl -X POST "http://localhost:8000/key_packages/ec063427-7f31-4370-a392-58925bc
 {"status":"uploaded","key_package_id":"b2abe672-e226-4218-9345-b5b53ec4203a",
 "ref_hash":"be985d6bc0a603a952bf41b3e53f496149019ee4d3150da3a8f8d754f90f3db7"}
 
-curl -X DELETE "http://localhost:8000/users/b0e004de-c5e3-4df2-92d5-007ca45ca699" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNjQ2MWYzMWYtNDgwYy00MTYwLWI4NWUtYWE0NmNlNmQ2NTBhIiwiZXhwIjoxNzcyMjIyMjU1fQ.XK3R_DHtgAywi2rKklG0sziqLnDOFYx5_XVZiGE4Iq0"
+curl -X DELETE "http://localhost:8000/users/230957e0-31cd-435b-857b-657a2b11e052" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMjMwOTU3ZTAtMzFjZC00MzViLTg1N2ItNjU3YTJiMTFlMDUyIiwiZXhwIjoxNzcyMzAwOTAxfQ.r9d7vwk3V9AoWkas102KsfBjvmJ9zrA94XsFmX_92Kg"
 
 {"status":"deleted","user_id":"ec063427-7f31-4370-a392-58925bc1986d"}
 
@@ -78,3 +78,20 @@ curl -X DELETE "http://localhost:8000/users/b0e004de-c5e3-4df2-92d5-007ca45ca699
             test_cleanup()
 
     print("\n=== Test finished ===")
+
+
+test_db_connection()
+    test_user = "alice"
+    user_id = test_user_registration(test_user,"1234")
+    if user_id:
+        user_id, token = test_user_login(test_user,"1234")
+        if user_id and token:
+           
+            user_privet, kp_user=GeneratKeyPackage(test_user)
+            ref_hash, key_package_id = test_upload_keypackage(user_id, kp_user)
+            if ref_hash:
+                latest_kp = test_get_latest_keypackage(user_id)
+                if latest_kp:
+                    test_mark_used(ref_hash)
+                    test_cleanup()
+                    bool_ret=test_delete_user(user_id, token)

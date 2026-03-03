@@ -75,7 +75,7 @@ def test_upload_keypackage(user_id: str, key_package_bytes: bytes):
         r.raise_for_status()
         print("SUCCESS: Uploaded")
         print("Response:", r.json())
-        return r.json().get("ref_hash")
+        return r.json().get("ref_hash"),r.json().get("key_package_id")
     except Exception as e:
         print("FAILED:", str(e))
         return None
@@ -99,8 +99,9 @@ def test_mark_used(ref_hash_hex: str):
     print(f"\n=== 6. Marking KeyPackage as used (ref_hash: {ref_hash_hex}) ===")
     try:
         r = requests.post(
-            f"{BASE_URL}/key_packages/mark_used",
-            json={"ref_hash": ref_hash_hex}
+            f"{BASE_URL}/key_packages/mark-used",
+            json={"ref_hash": ref_hash_hex},
+            headers={"Content-Type": "application/json"}
         )
         r.raise_for_status()
         print("SUCCESS:", r.json())
@@ -139,6 +140,30 @@ def test_delete_user(user_id: str, token: str):
         if hasattr(e, 'response') and e.response is not None:
             print("Response body:", e.response.text)
         return False
+    
+
+def test_new_mark_used(ref_hash_hex: str):
+    print(f"\n=== 6. Marking KeyPackage as used (ref_hash: {ref_hash_hex}) ===")
+    
+    # Clean the ref_hash - remove 0x prefix if present
+    if ref_hash_hex.startswith('0x'):
+        ref_hash_hex = ref_hash_hex[2:]
+        print(f"Cleaned ref_hash: {ref_hash_hex}")
+    
+    try:
+        r = requests.post(
+            f"{BASE_URL}/key_packages/new-mark-used",
+            json={"ref_hash": ref_hash_hex},
+            headers={"Content-Type": "application/json"}
+        )
+        print(f"Response status: {r.status_code}")
+        print(f"Response body: {r.text}")
+        r.raise_for_status()
+        print("SUCCESS:", r.json())
+    except Exception as e:
+        print("FAILED:", str(e))
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Error response: {e.response.text}")
 
 if __name__ == "__main__":
     print("=== Database & API Integration Test ===\n")
@@ -153,12 +178,12 @@ if __name__ == "__main__":
     if user_id:
         user_id, token = test_user_login(test_user,"1234")
         if user_id and token:
-           
             user_privet, kp_user=GeneratKeyPackage(test_user)
-            ref_hash = test_upload_keypackage(user_id, kp_user)
+            ref_hash, key_package_id = test_upload_keypackage(user_id, kp_user)
             if ref_hash:
                 latest_kp = test_get_latest_keypackage(user_id)
                 if latest_kp:
                     test_mark_used(ref_hash)
-                    #test_cleanup()
-                    bool_deleted = test_delete_user(user_id, token)
+                    test_cleanup()
+                    bool_ret=test_delete_user(user_id, token)
+    
