@@ -108,3 +108,59 @@ BEGIN
     RETURN v_count;
 END;
 $$ LANGUAGE plpgsql;
+
+--5. Groups table
+CREATE TABLE groups (
+    group_id           BYTEA PRIMARY KEY,                    -- The MLS group ID (VLBytes data)
+    group_name         TEXT,                                  -- Optional friendly name
+    creator_user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    cipher_suite       INTEGER NOT NULL,                      -- The cipher suite used
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    last_epoch         INTEGER DEFAULT 0,                     -- Current epoch
+    last_updated       TIMESTAMPTZ DEFAULT NOW(),
+    is_active          BOOLEAN DEFAULT TRUE
+);
+
+--6. Group members table (tracks membership)
+CREATE TABLE group_members (
+    group_id           BYTEA REFERENCES groups(group_id) ON DELETE CASCADE,
+    user_id            UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    leaf_index         INTEGER NOT NULL,                      -- Member's index in ratchet tree
+    joined_at          TIMESTAMPTZ DEFAULT NOW(),
+    is_active          BOOLEAN DEFAULT TRUE,
+    PRIMARY KEY (group_id, user_id)
+);
+
+--7. Encrypted messages table
+CREATE TABLE messages (
+    message_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_id           BYTEA NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
+    sender_user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    sender_leaf_index  INTEGER NOT NULL,                      -- Sender's leaf index at time of sending
+    epoch              INTEGER NOT NULL,                      -- Group epoch when message was sent
+    ciphertext         BYTEA NOT NULL,                        -- The encrypted message (PrivateMessage.ciphertext)
+    nonce              BYTEA NOT NULL,                        -- The nonce used for encryption (12 bytes)
+    content_type       INTEGER NOT NULL,                      -- ContentType (application, proposal, commit)
+    authenticated_data BYTEA DEFAULT '',                      -- Any AAD
+    encrypted_sender_data BYTEA DEFAULT '',                   -- Encrypted sender info if used
+    wire_format        INTEGER NOT NULL,                      -- MLS_WIRE_FORMAT_PUBLIC or PRIVATE
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    delivered_to       TEXT[] DEFAULT '{}',                   -- Track which members have received it
+    FOREIGN KEY (group_id, sender_user_id) REFERENCES group_members(group_id, user_id)
+);
+
+--8. Optional: Group epoch secrets (for backup/recovery - store securely!)
+CREATE TABLE epoch_secrets (
+    group_id           BYTEA REFERENCES groups(group_id) ON DELETE CASCADE,
+    epoch              INTEGER NOT NULL,
+    epoch_secret       BYTEA NOT NULL,                        -- Store encrypted in production!
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (group_id, epoch)
+);
+
+-- Indexes for performance
+CREATE INDEX idx_messages_group_id ON messages(group_id);
+CREATE INDEX idx_messages_epoch ON messages(epoch);
+CREATE INDEX idx_messages_created_at ON messages(created_at);
+CREATE INDEX idx_group_members_user_id ON group_members(user_id);
+CREATE INDEX idx_groups_creator ON groups(creator_user_id);

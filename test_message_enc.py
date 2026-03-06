@@ -3,7 +3,12 @@ import sys
 import secrets
 import requests
 from create_keypakage import GeneratKeyPackage
-from test_db_api import test_user_registration, test_user_login, test_upload_keypackage, test_get_latest_keypackage
+import base64
+from test_db_api import (
+    test_create_group, test_add_group_member, test_send_message,
+    test_update_group_epoch, test_get_group_details, test_user_registration, 
+    test_user_login, test_upload_keypackage, test_get_latest_keypackage
+)
 from encrypted_message_proper import test_encrypted_message
 
 sys.path.insert(0, r"C:\Users\ronys\Documents\RUC\Thesis\backend_mls\mls_stuff")
@@ -50,7 +55,7 @@ def create_empty_group(creator_leaf_node: LeafNode, creator_name: str = "bob"):
     print(f"Leaf 0 index after update: {tree[0]._leaf_index}")  # should be 0
 
     # 3. Generate the INITIAL EPOCH SECRET (32 bytes for AES-256)
-    epoch_secret = secrets.token_bytes(32)  # 🔑 THIS IS THE EPOCH SECRET!
+    epoch_secret = secrets.token_bytes(32)  #  THIS IS THE EPOCH SECRET!
     print(f"Initial epoch secret (first 16 bytes): {epoch_secret[:16].hex()}...")
     
     # 4. Generate init secret for next epoch
@@ -100,7 +105,7 @@ def add_member(group, new_member_id: str, committer_priv_bytes: bytes, committer
     # 1. Fetch new member's KeyPackage
     new_kp_bytes = test_get_latest_keypackage(new_member_id)
     if not new_kp_bytes:
-        print("Cannot add – KeyPackage not found")
+        print("Cannot add - KeyPackage not found")
         return None
 
     new_kp_bytes_mutable = bytearray(new_kp_bytes)
@@ -150,7 +155,7 @@ def add_member(group, new_member_id: str, committer_priv_bytes: bytes, committer
         msg_content=authenticated_content
     )
 
-    print("PublicMessage (Commit) created and signed – size:", len(public_commit.serialize()))
+    print("PublicMessage (Commit) created and signed - size:", len(public_commit.serialize()))
 
     # 9. Apply Commit to tree (add new leaf)
     tree = group["tree"]
@@ -177,7 +182,7 @@ def add_member(group, new_member_id: str, committer_priv_bytes: bytes, committer
     old_init_secret = group.get("init_secret")
     
     if old_epoch_secret is None or old_init_secret is None:
-        print("❌ ERROR: No epoch/init secret found in group!")
+        print(" ERROR: No epoch/init secret found in group!")
         return None
     
     print(f"Old epoch secret (first 16): {old_epoch_secret[:16].hex()}...")
@@ -233,7 +238,7 @@ def add_member(group, new_member_id: str, committer_priv_bytes: bytes, committer
         encrypted_group_info=VLBytes(b"")
     )
 
-    print(f"✅ {new_member_id} added!")
+    print(f" {new_member_id} added!")
     print(f"  New epoch: {group['epoch']}")
     print(f"  Members: {group['members']}")
     print(f"  New epoch secret saved")
@@ -269,7 +274,7 @@ if __name__ == "__main__":
     print("Bob's LeafNode extracted")
 
     group = create_empty_group(bob_leaf, "bob")
-    # Add Alice
+    
     welcome = add_member(group, user_id_alice, bob_priv_bytes)
     
     if welcome:

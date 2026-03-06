@@ -1,4 +1,434 @@
--- 1. Insert new KeyPackage (returns the inserted ID or error)
+-- =====================================================
+-- GROUP MANAGEMENT FUNCTIONS
+-- =====================================================
+
+-- 1. Create a new group
+CREATE OR REPLACE FUNCTION create_group(
+    p_group_id          bytea,
+    p_group_name        text,
+    p_creator_user_id   uuid,
+    p_cipher_suite      integer
+) RETURNS boolean AS $$
+BEGIN
+    INSERT INTO groups (group_id, group_name, creator_user_id, cipher_suite, last_epoch)
+    VALUES (p_group_id, p_group_name, p_creator_user_id, p_cipher_suite, 0);
+    
+    -- Add creator as first member (leaf index 0)
+    INSERT INTO group_members (group_id, user_id, leaf_index)
+    VALUES (p_group_id, p_creator_user_id, 0);
+    
+    RETURN TRUE;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Group with ID % already exists', encode(p_group_id, 'hex');
+    WHEN others THEN
+        RAISE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 2. Add a member to a group
+CREATE OR REPLACE FUNCTION add_group_member(
+    p_group_id          bytea,
+    p_user_id           uuid,
+    p_leaf_index        integer,
+    p_adder_user_id     uuid
+) RETURNS boolean AS $$
+DECLARE
+    v_is_member boolean;
+    v_user_exists boolean;
+BEGIN
+    -- Check if adder is a member of the group
+    SELECT EXISTS(
+        SELECT 1 FROM group_members 
+        WHERE group_id = p_group_id AND user_id = p_adder_user_id
+    ) INTO v_is_member;
+    
+    IF NOT v_is_member THEN
+        RAISE EXCEPTION 'User % is not a member of this group', p_adder_user_id;
+    END IF;
+    
+    -- Check if user to add exists
+    SELECT EXISTS(SELECT 1 FROM users WHERE user_id = p_user_id) INTO v_user_exists;
+    
+    IF NOT v_user_exists THEN
+        RAISE EXCEPTION 'User % does not exist', p_user_id;
+    END IF;
+    
+    -- Add new member
+    INSERT INTO group_members (group_id, user_id, leaf_index)
+    VALUES (p_group_id, p_user_id, p_leaf_index);
+    
+    -- Update group's last_updated
+    UPDATE groups SET last_updated = NOW() WHERE group_id = p_group_id;
+    
+    RETURN TRUE;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'User % is already a member of this group', p_user_id;
+    WHEN others THEN
+        RAISE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 3. Get group details with member count
+CREATE OR REPLACE FUNCTION get_group_details(
+    p_group_id bytea
+) RETURNS TABLE (
+    group_id            bytea,
+    group_name          text,
+    creator_user_id     uuid,
+    creator_username    text,
+    cipher_suite        integer,
+    last_epoch          integer,
+    created_at          timestamptz,
+    member_count        bigint
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        g.group_id,
+        g.group_name,
+        g.creator_user_id,
+        u.username as creator_username,
+        g.cipher_suite,
+        g.last_epoch,
+        g.created_at,
+        COUNT(gm.user_id)::bigint as member_count
+    FROM groups g
+    JOIN users u ON g.creator_user_id = u.user_id
+    LEFT JOIN group_members gm ON g.group_id = gm.group_id AND gm.is_active = TRUE
+    WHERE g.group_id = p_group_id
+    GROUP BY g.group_id, u.username;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 4. Get all groups for a user
+CREATE OR REPLACE FUNCTION get_user_groups(
+    p_user_id uuid
+) RETURNS TABLE (
+    group_id            bytea,
+    group_name          text,
+    last_epoch          integer,
+    member_count        bigint,
+    last_message_at     timestamptz
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        g.group_id,
+        g.group_name,
+        g.last_epoch,
+        COUNT(DISTINCT gm.user_id)::bigint as member_count,
+        MAX(m.created_at) as last_message_at
+    FROM groups g
+    JOIN group_members gm ON g.group_id = gm.group_id
+    LEFT JOIN messages m ON g.group_id = m.group_id
+    WHERE gm.user_id = p_user_id AND gm.is_active = TRUE
+    GROUP BY g.group_id, g.group_name, g.last_epoch;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 5. Update group epoch
+CREATE OR REPLACE FUNCTION update_group_epoch(
+    p_group_id          bytea,
+    p_new_epoch         integer,
+    p_user_id           uuid,
+    p_epoch_secret      bytea DEFAULT NULL
+) RETURNS boolean AS $$
+DECLARE
+    v_is_member boolean;
+BEGIN
+    -- Check if user is a member
+    SELECT EXISTS(
+        SELECT 1 FROM group_members 
+        WHERE group_id = p_group_id AND user_id = p_user_id AND is_active = TRUE
+    ) INTO v_is_member;
+    
+    IF NOT v_is_member THEN
+        RAISE EXCEPTION 'User % is not a member of this group', p_user_id;
+    END IF;
+    
+    -- Update group epoch
+    UPDATE groups 
+    SET last_epoch = p_new_epoch, last_updated = NOW() 
+    WHERE group_id = p_group_id;
+    
+    -- Store epoch secret if provided
+    IF p_epoch_secret IS NOT NULL THEN
+        INSERT INTO epoch_secrets (group_id, epoch, epoch_secret)
+        VALUES (p_group_id, p_new_epoch, p_epoch_secret)
+        ON CONFLICT (group_id, epoch) DO UPDATE 
+        SET epoch_secret = EXCLUDED.epoch_secret;
+    END IF;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 6. Remove member from group
+CREATE OR REPLACE FUNCTION remove_group_member(
+    p_group_id          bytea,
+    p_user_id           uuid,
+    p_remover_user_id   uuid
+) RETURNS boolean AS $$
+DECLARE
+    v_is_member boolean;
+    v_is_remover_member boolean;
+BEGIN
+    -- Check if remover is a member
+    SELECT EXISTS(
+        SELECT 1 FROM group_members 
+        WHERE group_id = p_group_id AND user_id = p_remover_user_id AND is_active = TRUE
+    ) INTO v_is_remover_member;
+    
+    IF NOT v_is_remover_member THEN
+        RAISE EXCEPTION 'User % is not a member of this group', p_remover_user_id;
+    END IF;
+    
+    -- Soft delete the member
+    UPDATE group_members 
+    SET is_active = FALSE 
+    WHERE group_id = p_group_id AND user_id = p_user_id
+    RETURNING TRUE INTO v_is_member;
+    
+    IF NOT v_is_member THEN
+        RAISE EXCEPTION 'User % is not a member of this group', p_user_id;
+    END IF;
+    
+    -- Update group timestamp
+    UPDATE groups SET last_updated = NOW() WHERE group_id = p_group_id;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- =====================================================
+-- MESSAGE MANAGEMENT FUNCTIONS
+-- =====================================================
+
+-- 7. Store a new message
+CREATE OR REPLACE FUNCTION store_message(
+    p_group_id              bytea,
+    p_sender_user_id        uuid,
+    p_epoch                 integer,
+    p_ciphertext            bytea,
+    p_nonce                 bytea,
+    p_content_type          integer,
+    p_authenticated_data    bytea DEFAULT '',
+    p_encrypted_sender_data bytea DEFAULT '',
+    p_wire_format           integer DEFAULT 1
+) RETURNS uuid AS $$
+DECLARE
+    v_message_id uuid;
+    v_leaf_index integer;
+    v_group_epoch integer;
+BEGIN
+    -- Get sender's leaf index
+    SELECT leaf_index INTO v_leaf_index
+    FROM group_members
+    WHERE group_id = p_group_id AND user_id = p_sender_user_id AND is_active = TRUE;
+    
+    IF v_leaf_index IS NULL THEN
+        RAISE EXCEPTION 'Sender is not a member of this group';
+    END IF;
+    
+    -- Verify group epoch
+    SELECT last_epoch INTO v_group_epoch
+    FROM groups WHERE group_id = p_group_id;
+    
+    IF p_epoch != v_group_epoch THEN
+        RAISE EXCEPTION 'Message epoch % does not match group epoch %', p_epoch, v_group_epoch;
+    END IF;
+    
+    -- Insert message
+    INSERT INTO messages (
+        group_id, sender_user_id, sender_leaf_index, epoch,
+        ciphertext, nonce, content_type, authenticated_data,
+        encrypted_sender_data, wire_format
+    ) VALUES (
+        p_group_id, p_sender_user_id, v_leaf_index, p_epoch,
+        p_ciphertext, p_nonce, p_content_type, p_authenticated_data,
+        p_encrypted_sender_data, p_wire_format
+    )
+    RETURNING message_id INTO v_message_id;
+    
+    RETURN v_message_id;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 8. Get messages for a group
+CREATE OR REPLACE FUNCTION get_group_messages(
+    p_group_id          bytea,
+    p_user_id           uuid,
+    p_since_epoch       integer DEFAULT NULL,
+    p_limit             integer DEFAULT 100
+) RETURNS TABLE (
+    message_id          uuid,
+    group_id            bytea,
+    sender_user_id      uuid,
+    sender_username     text,
+    sender_leaf_index   integer,
+    epoch               integer,
+    ciphertext          bytea,
+    nonce               bytea,
+    content_type        integer,
+    created_at          timestamptz
+) AS $$
+DECLARE
+    v_is_member boolean;
+BEGIN
+    -- Verify user is a group member (using table alias)
+    SELECT EXISTS(
+        SELECT 1 FROM group_members gm
+        WHERE gm.group_id = p_group_id 
+          AND gm.user_id = p_user_id 
+          AND gm.is_active = TRUE
+    ) INTO v_is_member;
+    
+    IF NOT v_is_member THEN
+        RAISE EXCEPTION 'User is not a member of this group';
+    END IF;
+    
+    RETURN QUERY
+    SELECT 
+        m.message_id,
+        m.group_id,
+        m.sender_user_id,
+        u.username,
+        m.sender_leaf_index,
+        m.epoch,
+        m.ciphertext,
+        m.nonce,
+        m.content_type,
+        m.created_at
+    FROM messages m
+    JOIN users u ON m.sender_user_id = u.user_id
+    WHERE m.group_id = p_group_id
+        AND (p_since_epoch IS NULL OR m.epoch >= p_since_epoch)
+    ORDER BY m.epoch ASC, m.created_at ASC
+    LIMIT p_limit;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 9. Mark messages as delivered for a user
+CREATE OR REPLACE FUNCTION mark_messages_delivered(
+    p_group_id          bytea,
+    p_user_id           uuid,
+    p_message_ids       uuid[]
+) RETURNS integer AS $$
+DECLARE
+    v_count integer;
+BEGIN
+    WITH updated AS (
+        UPDATE messages
+        SET delivered_to = array_append(delivered_to, p_user_id::text)
+        WHERE group_id = p_group_id 
+          AND message_id = ANY(p_message_ids)
+          AND NOT (p_user_id::text = ANY(delivered_to))
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO v_count FROM updated;
+    
+    RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 10. Get undelivered messages for a user
+CREATE OR REPLACE FUNCTION get_undelivered_messages(
+    p_user_id uuid
+) RETURNS TABLE (
+    message_id          uuid,
+    group_id            bytea,
+    sender_user_id      uuid,
+    sender_username     text,
+    epoch               integer,
+    ciphertext          bytea,
+    created_at          timestamptz
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        m.message_id,
+        m.group_id,
+        m.sender_user_id,
+        u.username as sender_username,
+        m.epoch,
+        m.ciphertext,
+        m.created_at
+    FROM messages m
+    JOIN users u ON m.sender_user_id = u.user_id
+    WHERE m.group_id IN (
+        SELECT group_id FROM group_members 
+        WHERE user_id = p_user_id AND is_active = TRUE
+    )
+    AND NOT (p_user_id::text = ANY(m.delivered_to))
+    ORDER BY m.created_at ASC;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 11. Get epoch secret for recovery
+CREATE OR REPLACE FUNCTION get_epoch_secret(
+    p_group_id bytea,
+    p_epoch integer,
+    p_user_id uuid
+) RETURNS bytea AS $$
+DECLARE
+    v_secret bytea;
+BEGIN
+    -- Verify user is a group member
+    IF NOT EXISTS(
+        SELECT 1 FROM group_members 
+        WHERE group_id = p_group_id AND user_id = p_user_id AND is_active = TRUE
+    ) THEN
+        RAISE EXCEPTION 'User is not a member of this group';
+    END IF;
+    
+    -- Get secret
+    SELECT epoch_secret INTO v_secret
+    FROM epoch_secrets
+    WHERE group_id = p_group_id AND epoch = p_epoch;
+    
+    RETURN v_secret;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- 12. Delete a group and all related data (cascade)
+CREATE OR REPLACE FUNCTION delete_group(
+    p_group_id bytea,
+    p_user_id uuid
+) RETURNS boolean AS $$
+DECLARE
+    v_is_creator boolean;
+BEGIN
+    -- Check if user is the creator
+    SELECT EXISTS(
+        SELECT 1 FROM groups 
+        WHERE group_id = p_group_id AND creator_user_id = p_user_id
+    ) INTO v_is_creator;
+    
+    IF NOT v_is_creator THEN
+        RAISE EXCEPTION 'Only the group creator can delete the group';
+    END IF;
+    
+    -- Delete group (cascade will handle members, messages, secrets)
+    DELETE FROM groups WHERE group_id = p_group_id;
+    
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 13. Insert new KeyPackage (returns the inserted ID or error)
 CREATE OR REPLACE FUNCTION insert_key_package(
     p_user_id       uuid,
     p_key_package   bytea,
@@ -31,7 +461,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- 2. Get latest unused KeyPackage for a user
+-- 14. Get latest unused KeyPackage for a user
 CREATE OR REPLACE FUNCTION get_latest_unused_key_package(
     p_user_id uuid
 ) RETURNS TABLE (
@@ -55,7 +485,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- 3. Mark KeyPackage as used (by ref_hash)
+-- 15. Mark KeyPackage as used (by ref_hash)
 CREATE OR REPLACE FUNCTION mark_key_package_used(
     p_ref_hash bytea
 ) RETURNS boolean AS $$
@@ -73,7 +503,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- 4. Cleanup expired or used packages (can be called by cron)
+-- 16. Cleanup expired or used packages (can be called by cron)
 CREATE OR REPLACE FUNCTION cleanup_old_key_packages() RETURNS integer AS $$
 DECLARE
     v_count integer;
