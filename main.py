@@ -290,12 +290,29 @@ async def get_group(group_id: str, token: str = Depends(oauth2_scheme)):
 
 @app.get("/users/me/groups")
 async def get_my_groups(token: str = Depends(oauth2_scheme)):
-    """Get all groups for current user"""
+    """Get all groups for current user with membership details"""
     user_id = verify_token(token)
     
     async with db.connection() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM get_user_groups($1)",
+            """
+            SELECT 
+                g.group_id,
+                g.group_name,
+                g.last_epoch,
+                g.cipher_suite,
+                COUNT(DISTINCT gm_all.user_id) as member_count,
+                MAX(m.created_at) as last_message_at,
+                gm.leaf_index as my_leaf_index,
+                gm.joined_at as my_joined_at
+            FROM groups g
+            JOIN group_members gm ON g.group_id = gm.group_id AND gm.user_id = $1
+            LEFT JOIN group_members gm_all ON g.group_id = gm_all.group_id AND gm_all.is_active = TRUE
+            LEFT JOIN messages m ON g.group_id = m.group_id
+            WHERE gm.is_active = TRUE
+            GROUP BY g.group_id, g.group_name, g.last_epoch, g.cipher_suite, gm.leaf_index, gm.joined_at
+            ORDER BY g.last_updated DESC
+            """,
             user_id
         )
     
@@ -304,9 +321,12 @@ async def get_my_groups(token: str = Depends(oauth2_scheme)):
             {
                 "group_id": base64.b64encode(row["group_id"]).decode('ascii'),
                 "group_name": row["group_name"],
+                "cipher_suite": row["cipher_suite"],
                 "epoch": row["last_epoch"],
                 "member_count": row["member_count"],
-                "last_message_at": row["last_message_at"]
+                "last_message_at": row["last_message_at"].isoformat() if row["last_message_at"] else None,
+                "my_leaf_index": row["my_leaf_index"],  # 🔑 Alice's leaf index in this group
+                "my_joined_at": row["my_joined_at"].isoformat()
             }
             for row in rows
         ]

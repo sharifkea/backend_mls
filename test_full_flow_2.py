@@ -316,6 +316,94 @@ def register_user(username, password):
         return test_user_login(username, password)
     return None, None
 
+def complete_distributed_flow():
+    """Simulate a truly distributed flow with separate sessions"""
+    
+    # ===== BOB'S SESSION =====
+    print("\n" + "="*30 + " BOB'S SESSION " + "="*30)
+    
+    # Bob logs in
+    username="bob"
+    password="1234"
+    bob_id, bob_token = test_user_login(username, password)
+
+    # 2. Generate and upload key packages
+    bob_priv, bob_kp = GeneratKeyPackage(username) # Generating PackageKey
+    ref_hash_bob, kp_id_bob = test_upload_keypackage(bob_id, bob_kp) #saving packageKey to DB
+    
+    # Bob creates group
+    bob_kp_bytes = test_get_latest_keypackage(bob_id)
+    bob_kp_obj = KeyPackage.deserialize(bytearray(bob_kp_bytes))
+    group = create_empty_group(bob_kp_obj.content.leaf_node, "bob")
+    
+    # Save group to DB
+    test_create_group_with_id("MLS Test Group", 1, bob_token, group['group_id_b64'])
+    
+    # Bob needs Alice's ID - he looks her up
+    alice_info = get_user_by_username("alice", bob_token)
+    alice_id = alice_info['user_id']
+    
+    # Bob adds Alice
+    add_member(group, alice_id, bob_priv)
+    test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token)
+    test_update_group_epoch(group['group_id_b64'], group['epoch'], bob_token, group['epoch_secret'])
+    
+    # Bob sends a message
+    bob_msg, nonce = send_encrypted_message(group, 0, "Hello Alice!", group["epoch_secret"])
+    test_send_message(group['group_id_b64'], bob_msg.msg_content.ciphertext.data, 
+                     nonce, group['epoch'], 1, bob_token)
+    
+    print("✅ Bob's session complete")
+    
+    # ===== ALICE'S SESSION (later, different computer) =====
+    print("\n" + "="*30 + " ALICE'S SESSION " + "="*30)
+    
+    # Alice logs in
+    alice_id, alice_token = test_user_login("alice", "1234")
+    
+    # Alice gets her groups - THIS TELLS HER WHICH GROUPS SHE'S IN AND HER LEAF INDEX
+    alice_groups = test_get_my_groups(alice_token)
+    
+    # Find the group Bob added her to
+    target_group = None
+    for g in alice_groups['groups']:
+        if g['group_name'] == "MLS Test Group":
+            target_group = g
+            break
+    
+    if target_group:
+        print(f"✅ Alice found group: {target_group['group_name']}")
+        print(f"   Her leaf index: {target_group['my_leaf_index']}")
+        print(f"   Current epoch: {target_group['epoch']}")
+        
+        # Alice needs the epoch secret to decrypt messages
+        # In MLS, this comes from the Welcome message
+        # For now, she would need to either:
+        # 1. Have stored it from the Welcome message, or
+        # 2. Have a secure way to get it (key escrow, etc.)
+        
+        # Alice fetches messages
+        messages = test_get_group_messages(target_group['group_id'], alice_token)
+        
+        if messages and 'messages' in messages:
+            for msg in messages['messages']:
+                # Reconstruct message from DB
+                reconstructed_msg, nonce = reconstruct_message_from_db(
+                    msg, 
+                    base64.b64decode(target_group['group_id'])
+                )
+                
+                # Decrypt using epoch secret (Alice needs this!)
+                # In a real implementation, Alice would have the epoch secret from Welcome
+                if 'epoch_secret' in alice_group_state:
+                    decrypted = receive_encrypted_message(
+                        alice_group_state,  # Alice's group state with epoch_secret
+                        reconstructed_msg,
+                        nonce,
+                        msg['sender_leaf_index'],
+                        alice_group_state['epoch_secret']
+                    )
+                    print(f"   Alice read: '{decrypted}'")
 
 if __name__ == "__main__":
     run_full_flow()

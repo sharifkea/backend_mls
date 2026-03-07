@@ -1,0 +1,192 @@
+$ python test_full_flow.py
+
+============================================================
+COMPLETE MLS FLOW WITH DATABASE PERSISTENCE
+============================================================
+
+📝 STEP 1: Registering users
+
+=== 2. Registering user alice ===
+SUCCESS: User registered
+Response: {'status': 'registered', 'user_id': 'ae16d27c-8540-4b60-997c-8d837614f66a'}
+
+=== 3. Logging in user alice ===
+SUCCESS: User logged in
+Response: {'status': 'logged in', 'user_id': 'ae16d27c-8540-4b60-997c-8d837614f66a', 'access_token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYWUxNmQyN2MtODU0MC00YjYwLTk5N2MtOGQ4Mzc2MTRmNjZhIiwiZXhwIjoxNzcyOTIzNzg2fQ.1muxo49LEaTAig2E0O5XWnBzCw7OD4-4-CYaYENWpXM', 'token_type': 'bearer'}
+
+=== 2. Registering user bob ===
+SUCCESS: User registered
+Response: {'status': 'registered', 'user_id': '1e63e824-3534-4f3c-8f0e-49ce45b0a7a2'}
+
+=== 3. Logging in user bob ===
+SUCCESS: User logged in
+Response: {'status': 'logged in', 'user_id': '1e63e824-3534-4f3c-8f0e-49ce45b0a7a2', 'access_token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMWU2M2U4MjQtMzUzNC00ZjNjLThmMGUtNDljZTQ1YjBhN2EyIiwiZXhwIjoxNzcyOTIzNzkxfQ.LwYBepeQeDh0RAQCk_epfdM8miW_GG-0KCWjSy7hsk4', 'token_type': 'bearer'}
+
+🔑 STEP 2: Uploading key packages
+=== Generating KeyPackage ===
+
+Raw private key length: 32 bytes
+Raw public key length : 32 bytes
+
+alices private Key (hex): bbdd31267ce200210fb9957859f5601711d3475fcdd4cb7e74a4982c962cd71d
+
+Raw private key length: 32 bytes
+Raw public key length : 32 bytes
+
+LeafNode created and signed
+KeyPackageTBS created
+Full KeyPackage created!
+Signature length: 64 bytes
+Full serialized KeyPackage length: 285 bytes
+First 32 bytes (hex): 00010001201bca24088d10f4549141c790b14985b162df78cddf92a811d12f0e
+=== Generating KeyPackage ===
+
+Raw private key length: 32 bytes
+Raw public key length : 32 bytes
+
+bobs private Key (hex): bd742210f8b656ba99a533d1e1f8af2e2ad0adb201a3a4925fe7040a54f044cb
+
+Raw private key length: 32 bytes
+Raw public key length : 32 bytes
+
+LeafNode created and signed
+KeyPackageTBS created
+Full KeyPackage created!
+Signature length: 64 bytes
+Full serialized KeyPackage length: 283 bytes
+First 32 bytes (hex): 00010001203ceba7ed3b782e7ae42e46aa705f5656651560b3af768990c5dd0e
+
+=== 4. Uploading KeyPackage for ae16d27c-8540-4b60-997c-8d837614f66a ===
+First 32 bytes (hex): 00010001201bca24088d10f4549141c790b14985b162df78cddf92a811d12f0e
+SUCCESS: Uploaded
+Response: {'status': 'uploaded', 'key_package_id': 'd22e5a85-a48f-4b8e-a99b-2e0074259bf8', 'ref_hash': '707da1464fee9678794da1922fda799ab95c3221dde754274799531755d91fcb'}
+
+=== 4. Uploading KeyPackage for 1e63e824-3534-4f3c-8f0e-49ce45b0a7a2 ===
+First 32 bytes (hex): 00010001203ceba7ed3b782e7ae42e46aa705f5656651560b3af768990c5dd0e
+SUCCESS: Uploaded
+Response: {'status': 'uploaded', 'key_package_id': 'ba214019-6fe9-4898-b910-a9c3ed03e58a', 'ref_hash': '42e180452ce86d1e13c97b28b766d4d284e96a75f7e727779c6a399bbf91035c'}
+
+👥 STEP 3: Bob creates group
+
+=== 5. Fetching latest unused KeyPackage for 1e63e824-3534-4f3c-8f0e-49ce45b0a7a2 ===
+SUCCESS: Fetched
+Size: 283 bytes
+Content-Type: application/octet-stream
+
+=== Bob creates empty group ===
+Group ID (hex): 7be000371bb046df4bd2e3a010c50b8f
+Initial epoch secret (first 16 bytes): ec2b86bee4671516322cfb5b19369ee7...
+
+=== Saving group to database with ID: e+AANxuwRt9L0uOgEMULjw== ===
+
+=== Creating group: MLS Test Group ===
+SUCCESS: Group created
+Response: {'status': 'created', 'group_id': 'e+AANxuwRt9L0uOgEMULjw=='}
+✅ Group successfully saved to database
+
+➕ STEP 4: Bob adds Alice to group
+
+=== Adding ae16d27c-8540-4b60-997c-8d837614f66a to group ===
+  New epoch: 1
+
+=== Adding member ae16d27c-8540-4b60-997c-8d837614f66a to group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Member added
+Response: {'status': 'member_added'}
+
+=== Updating group e+AANxuwRt9L0uOgEMULjw== to epoch 1 ===
+SUCCESS: Group epoch updated
+Response: {'status': 'updated', 'new_epoch': 1}
+
+💬 STEP 5: Bob sends encrypted message
+
+=== Sending ENCRYPTED message from leaf 0 ===
+   Plaintext: 'Hello Alice! This message is stored in the database!' (52 bytes)
+   Content to encrypt: 85 bytes
+
+🔑 Deriving message encryption key for epoch 1
+   Message key (first 16): 2a40aa23fa51bb8d323025e1a70b42c1...
+   Encrypted: 101 bytes
+   Nonce: 62cf50a7713b7d4fb0867c5e
+✅ PrivateMessage created
+   Total size: 135 bytes
+
+=== Storing message for group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Message stored
+Response: {'status': 'stored', 'message_id': '524a146a-a6ba-41e5-9507-5feb0dc69444'}
+✅ Bob's message saved to DB with ID: 524a146a-a6ba-41e5-9507-5feb0dc69444
+
+📥 STEP 6: Alice retrieves messages from database
+
+=== Getting messages from group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Messages retrieved
+Found 1 messages
+📨 Alice retrieved 1 messages from database
+
+=== Receiving ENCRYPTED message ===
+   PrivateMessage details:
+     - Group ID: 7be000371bb046df...
+     - Epoch: 1
+     - Content type: 1
+     - Ciphertext size: 101 bytes
+
+🔑 Deriving message encryption key for epoch 1
+   Message key (first 16): 2a40aa23fa51bb8d323025e1a70b42c1...
+   Decrypted: 85 bytes
+   Successfully parsed FramedContent
+✅ Message received: 'Hello Alice! This message is stored in the database!'
+   ✅ Alice read: 'Hello Alice! This message is stored in the database!'
+
+📤 STEP 7: Alice sends reply
+
+=== Sending ENCRYPTED message from leaf 1 ===
+   Plaintext: 'Hi Bob! I got your message from the database!' (45 bytes)
+   Content to encrypt: 78 bytes
+
+🔑 Deriving message encryption key for epoch 1
+   Message key (first 16): 2a40aa23fa51bb8d323025e1a70b42c1...
+   Encrypted: 94 bytes
+   Nonce: d7cafaacce72dedb4e905b48
+✅ PrivateMessage created
+   Total size: 128 bytes
+
+=== Storing message for group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Message stored
+Response: {'status': 'stored', 'message_id': 'dc11ef48-41da-45c3-ad76-f49a083ae2f2'}
+✅ Alice's reply saved to DB with ID: dc11ef48-41da-45c3-ad76-f49a083ae2f2
+
+📥 STEP 8: Bob retrieves messages from database
+
+=== Getting messages from group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Messages retrieved
+Found 2 messages
+📨 Bob retrieved 2 messages from database
+
+   📬 Bob decrypting Alice's reply...
+
+=== Receiving ENCRYPTED message ===
+   PrivateMessage details:
+     - Group ID: 7be000371bb046df...
+     - Epoch: 1
+     - Content type: ContentType.application
+     - Ciphertext size: 94 bytes
+
+🔑 Deriving message encryption key for epoch 1
+   Message key (first 16): 2a40aa23fa51bb8d323025e1a70b42c1...
+   Decrypted: 78 bytes
+   Successfully parsed FramedContent
+✅ Message received: 'Hi Bob! I got your message from the database!'
+   ✅ Bob read: 'Hi Bob! I got your message from the database!'
+
+✅ STEP 9: Final verification
+
+=== Getting messages from group e+AANxuwRt9L0uOgEMULjw== ===
+SUCCESS: Messages retrieved
+Found 2 messages
+
+============================================================
+🎉 SUCCESS: Full MLS flow with database persistence!
+============================================================
+   Group ID: e+AANxuwRt9L0uOgEMULjw==
+   Members: 2
+   Current epoch: 1
+   Messages in DB: 2

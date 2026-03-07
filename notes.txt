@@ -42,61 +42,98 @@ git push -u origin main
 
 curl -X POST "http://localhost:8000/users" -H "Content-Type: application/json" -d '{"username": "alice", "password": "secret"}'
 
-{"status":"registered",
-"user_id":"ec063427-7f31-4370-a392-58925bc1986d"}
+username="bob"
+password="1234"
 
-curl -X POST "http://localhost:8000/login" \
--H "Content-Type: application/x-www-form-urlencoded" \
--d "username=alice&password=secret"
+#1. Register and login users
+user_id = test_user_registration(username, password)
+user_id, user_token = return test_user_login(username, password)
 
-{"status":"logged in",
-"user_id":"7f009848-2a11-4998-905e-02ba969b9bf5",
-"access_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiN2YwMDk4NDgtMmExMS00OTk4LTkwNWUtMDJiYTk2OWI5YmY1IiwiZXhwIjoxNzcyMjIxNTUzfQ.nCFvBjzqjooXgC2Bo0OAGbOQK7LZNs6w7eepB7b7K3o",
-"token_type":"bearer"
+# 2. Generate and upload key packages
+user_priv, user_kp = GeneratKeyPackage(username) # Generating PackageKey
+ref_hash_user, kp_id_user = test_upload_keypackage(user_id, user_kp) #saving packageKey to DB
 
-curl -X POST "http://localhost:8000/key_packages/ec063427-7f31-4370-a392-58925bc1986d" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary "@alice_keypackage.bin"
+# 3. User creates group
+user_kp_bytes = test_get_latest_keypackage(user_id) # Getting users latest keypackage in user_kp_bytes
+user_kp_obj = KeyPackage.deserialize(bytearray(user_kp_bytes)) # Creating user keypackage object  
+group = create_empty_group(bob_kp_obj.content.leaf_node, username) # user is creating an empty group
+create_response = test_create_group_with_id("MLS Test Group", 1, user_token, group['group_id_b64']) # Saving group information to DB
 
-{"status":"uploaded","key_package_id":"b2abe672-e226-4218-9345-b5b53ec4203a",
-"ref_hash":"be985d6bc0a603a952bf41b3e53f496149019ee4d3150da3a8f8d754f90f3db7"}
+# 4. Bob adds Alice to group as Bob created the group and Alice is registered
+add_member(group, alice_id, bob_priv) 
+test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token) # Add member to database (in group)    
+test_update_group_epoch(group['group_id_b64'], group['epoch'], bob_token, group['epoch_secret']) # Updateing epoch in DB
 
-curl -X DELETE "http://localhost:8000/users/230957e0-31cd-435b-857b-657a2b11e052" \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMjMwOTU3ZTAtMzFjZC00MzViLTg1N2ItNjU3YTJiMTFlMDUyIiwiZXhwIjoxNzcyMzAwOTAxfQ.r9d7vwk3V9AoWkas102KsfBjvmJ9zrA94XsFmX_92Kg"
+# 5. Sending message (Bob sending)
+bob_msg, bob_nonce = send_encrypted_message( group,
+     0, # Senders leaf node index
+     "The message", 
+     group["epoch_secret"]
+) # Encrypting the message group epoch secret
 
-{"status":"deleted","user_id":"ec063427-7f31-4370-a392-58925bc1986d"}
+bob_msg_id = test_send_message(
+    group['group_id_b64'],
+    bob_msg.msg_content.ciphertext.data,
+    bob_nonce,
+    group['epoch'],
+    1,
+    bob_token
+) # Bob saves his message to database
 
- alice_priv_bytes, alice_kp_bytes = GeneratKeyPackage(test_user)
-    #test_user = f"testuser-{uuid4().hex[:8]}"
-
-
-
-    uploaded_ref_hash = test_upload_keypackage(test_user, alice_kp_bytes)
-
-    if uploaded_ref_hash:
-        fetched_data = test_get_latest_keypackage(test_user)
-
-        if fetched_data:
-            test_mark_used(uploaded_ref_hash)
-            test_cleanup()
-
-    print("\n=== Test finished ===")
-
-print("✅ Welcome ready to send to Alice!")
-        
-        # Now group contains NEW epoch secret for epoch 1!
-        print(f"\nCurrent epoch: {group['epoch']}")
-        print(f"Current epoch secret: {group['epoch_secret'][:16].hex()}...")
-                
-        # Bob sends encrypted message (Bob is index 0)
-        bob_msg, key, nonce = send_encrypted_message(
-            group, 0, bob_priv_bytes, 
-            "Hello Alice! This is ENCRYPTED with real epoch secret!", 
-            group["epoch_secret"]  # Pass the actual epoch secret!
+# 6. Receiving message (Alice receiving)
+messages_response = test_get_group_messages(group['group_id_b64'], alice_token) # Receives encrypted message from DB
+messages = messages_response['messages'] # getting message from messages_response
+for i, msg_data in enumerate(messages):
+    # Decode base64 data
+    ciphertext = base64.b64decode(msg_data['ciphertext'])
+    nonce = base64.b64decode(msg_data['nonce'])
+    sender_idx = msg_data['sender_leaf_index']
+    if i == 0 and sender_idx == 0:  # Bob's message
+        decrypted = receive_encrypted_message(
+            group, 
+            bob_msg,  # In reality, this would be reconstructed from DB
+            nonce, 
+            sender_idx, 
+            group["epoch_secret"]
         )
-        
-        # Alice receives and decrypts
-        received = receive_encrypted_message(
-            group, bob_msg, 0, group["epoch_secret"]
-        )
-    
+         print(f"Alice read: '{decrypted}'")
+
+
+
+for i, msg_data in enumerate(messages):
+            print(f"\n--- Processing message {i+1} ---")
+            print(f"   From sender leaf: {msg_data['sender_leaf_index']}")
+            print(f"   Epoch: {msg_data['epoch']}")
+            print(f"   Created at: {msg_data['created_at']}")
+            
+            # Reconstruct message from database data
+            # In a real implementation, you'd need to reconstruct the MLSMessage object
+            # For testing, we'll simulate by creating a mock message
+            
+            # Decode base64 data
+            ciphertext = base64.b64decode(msg_data['ciphertext'])
+            nonce = base64.b64decode(msg_data['nonce'])
+            sender_idx = msg_data['sender_leaf_index']
+            
+            print(f"   Ciphertext size: {len(ciphertext)} bytes")
+            print(f"   Nonce: {nonce.hex()}")
+            
+            # For proper MLSMessage reconstruction, you'd need to:
+            # 1. Create a PrivateMessage object from the DB fields
+            # 2. Wrap it in an MLSMessage
+            
+            # SIMPLIFIED: We'll use the original message objects we have in memory
+            # In a real distributed system, you'd reconstruct properly
+            if i == 0 and sender_idx == 0:  # Bob's message
+                print("   📬 Alice decrypting Bob's message...")
+                # Use the original bob_msg we have in memory
+                # In reality, Alice would reconstruct from DB data
+                decrypted = receive_encrypted_message(
+                    group, 
+                    bob_msg,  # In reality, this would be reconstructed from DB
+                    nonce, 
+                    sender_idx, 
+                    group["epoch_secret"]
+                )
+                if decrypted:
+                    print(f"   ✅ Alice read: '{decrypted}'")
