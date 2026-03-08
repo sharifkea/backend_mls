@@ -6,7 +6,7 @@ from test_db_api import (
     test_user_registration, test_user_login, test_upload_keypackage,
     test_get_latest_keypackage, test_create_group_with_id, test_add_group_member,
     test_send_message, test_get_group_messages, test_update_group_epoch,
-    test_get_group_details, test_get_my_groups
+    test_get_group_details, test_get_my_groups, get_user_by_username, get_user_by_id, search_users
 )
 from create_keypakage import GeneratKeyPackage
 from encrypted_message_proper import send_encrypted_message, receive_encrypted_message
@@ -133,182 +133,6 @@ def add_member(group, new_member_id, committer_priv_bytes, committer_index=0):
     print(f"  New epoch: {group['epoch']}")
     return True
 
-def run_full_flow():
-    """Run complete MLS flow with database persistence"""
-    
-    print("\n" + "="*60)
-    print("COMPLETE MLS FLOW WITH DATABASE PERSISTENCE")
-    print("="*60)
-    
-    # 1. Register users
-    print("\n📝 STEP 1: Registering users")
-    alice_id, alice_token = register_user("alice", "1234")
-    bob_id, bob_token = register_user("bob", "1234")
-    
-    if not alice_id or not bob_id:
-        print("❌ Failed to register users")
-        return
-    
-    # 2. Generate and upload key packages
-    print("\n🔑 STEP 2: Uploading key packages")
-    alice_priv, alice_kp = GeneratKeyPackage("alice")
-    bob_priv, bob_kp = GeneratKeyPackage("bob")
-    
-    ref_hash_alice, kp_id_alice = test_upload_keypackage(alice_id, alice_kp)
-    ref_hash_bob, kp_id_bob = test_upload_keypackage(bob_id, bob_kp)
-    
-    # 3. Bob creates group
-    print("\n👥 STEP 3: Bob creates group")
-    bob_kp_bytes = test_get_latest_keypackage(bob_id)
-    if not bob_kp_bytes:
-        print("❌ Cannot get Bob's key package")
-        return
-        
-    bob_kp_obj = KeyPackage.deserialize(bytearray(bob_kp_bytes))
-    group = create_empty_group(bob_kp_obj.content.leaf_node, "bob")
-    
-    # Save group to database with the SAME group ID
-    print(f"\n=== Saving group to database with ID: {group['group_id_b64']} ===")
-    create_response = test_create_group_with_id(
-        "MLS Test Group", 
-        1, 
-        bob_token, 
-        group['group_id_b64']  # Pass the existing group ID
-    )
-    
-    if not create_response:
-        print("❌ Failed to save group to database")
-        return
-    
-    print("✅ Group successfully saved to database")
-    
-    # 4. Bob adds Alice to group
-    print("\n➕ STEP 4: Bob adds Alice to group")
-    add_member(group, alice_id, bob_priv)
-    
-    # Add member to database
-    test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token)
-    
-    # Update epoch in database
-    test_update_group_epoch(
-        group['group_id_b64'], 
-        group['epoch'],  # Should be 1 after add_member
-        bob_token, 
-        group['epoch_secret']
-    )
-    
-    # 5. Bob sends an encrypted message
-    print("\n💬 STEP 5: Bob sends encrypted message")
-    bob_msg, bob_nonce = send_encrypted_message(
-        group, 0, "Hello Alice! This message is stored in the database!", 
-        group["epoch_secret"]
-    )
-    
-    # Bob saves his message to database
-    bob_msg_id = test_send_message(
-        group['group_id_b64'],
-        bob_msg.msg_content.ciphertext.data,
-        bob_nonce,
-        group['epoch'],
-        1,  # ContentType.application
-        bob_token
-    )
-    
-    if bob_msg_id:
-        print(f"✅ Bob's message saved to DB with ID: {bob_msg_id}")
-    
-    # 6. Alice retrieves and decrypts messages (simulating separate session)
-    print("\n📥 STEP 6: Alice retrieves messages from database")
-    
-    # Alice fetches messages from the database
-    messages_response = test_get_group_messages(group['group_id_b64'], alice_token)
-    #receive_encrypted_message()
-    
-    if messages_response and 'messages' in messages_response:
-        messages = messages_response['messages']
-        print(f"📨 Alice retrieved {len(messages)} messages from database")
-        
-        for msg_data in messages_response['messages']:
-            reconstructed_msg, nonce = reconstruct_message_from_db(
-                msg_data, 
-                base64.b64decode(group['group_id_b64'])
-            )
-            
-            decrypted = receive_encrypted_message(
-                group, 
-                reconstructed_msg,  # ✅ From DB, not from Bob's memory!
-                nonce, 
-                msg_data['sender_leaf_index'], 
-                group["epoch_secret"]
-            )
-            if decrypted:
-                print(f"   ✅ Alice read: '{decrypted}'")
-    
-    # 7. Alice replies
-    print("\n📤 STEP 7: Alice sends reply")
-    alice_msg, alice_nonce = send_encrypted_message(
-        group, 1, "Hi Bob! I got your message from the database!", 
-        group["epoch_secret"]
-    )
-    
-    # Alice saves her reply to database
-    alice_msg_id = test_send_message(
-        group['group_id_b64'],
-        alice_msg.msg_content.ciphertext.data,
-        alice_nonce,
-        group['epoch'],
-        1,
-        alice_token
-    )
-    
-    if alice_msg_id:
-        print(f"✅ Alice's reply saved to DB with ID: {alice_msg_id}")
-    
-    # 8. Bob retrieves messages (simulating his separate session)
-    print("\n📥 STEP 8: Bob retrieves messages from database")
-    
-    # Bob fetches messages (including Alice's reply)
-    bob_messages_response = test_get_group_messages(group['group_id_b64'], bob_token)
-    
-    if bob_messages_response and 'messages' in bob_messages_response:
-        bob_messages = bob_messages_response['messages']
-        print(f"📨 Bob retrieved {len(bob_messages)} messages from database")
-        
-        # Bob should see 2 messages now (his own and Alice's reply)
-        for msg_data in bob_messages:
-            if msg_data['sender_leaf_index'] == 1:  # Alice's message
-                print("\n   📬 Bob decrypting Alice's reply...")
-                # Decode data
-                ciphertext = base64.b64decode(msg_data['ciphertext'])
-                nonce = base64.b64decode(msg_data['nonce'])
-                
-                # Use the original alice_msg we have in memory
-                # In reality, Bob would reconstruct from DB
-                decrypted = receive_encrypted_message(
-                    group, 
-                    alice_msg,  # In reality, this would be reconstructed
-                    nonce, 
-                    1, 
-                    group["epoch_secret"]
-                )
-                if decrypted:
-                    print(f"   ✅ Bob read: '{decrypted}'")
-    
-    # 9. Final verification
-    print("\n✅ STEP 9: Final verification")
-    final_messages = test_get_group_messages(group['group_id_b64'], bob_token)
-    
-    if final_messages and len(final_messages.get('messages', [])) >= 2:
-        print("\n" + "="*60)
-        print("🎉 SUCCESS: Full MLS flow with database persistence!")
-        print("="*60)
-        print(f"   Group ID: {group['group_id_b64']}")
-        print(f"   Members: {len(group['members'])}")
-        print(f"   Current epoch: {group['epoch']}")
-        print(f"   Messages in DB: {len(final_messages['messages'])}")
-    else:
-        print("\n❌ Failed to verify messages in database")
-
 def register_user(username, password):
     """Helper to register and login a user"""
     user_id = test_user_registration(username, password)
@@ -339,13 +163,17 @@ def complete_distributed_flow():
     # Save group to DB
     test_create_group_with_id("MLS Test Group", 1, bob_token, group['group_id_b64'])
     
-    # Bob needs Alice's ID - he looks her up
-    alice_info = get_user_by_username("alice", bob_token)
-    alice_id = alice_info['user_id']
+     # Search for Alice by username
+    alice_user_info = get_user_by_username("alice", bob_token)
     
-    # Bob adds Alice
+    alice_id = alice_user_info['user_id']
+    print(f"Bob found Alice with ID: {alice_id}")
+    
+    # Now Bob can add Alice to the group
     add_member(group, alice_id, bob_priv)
     test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token)
+    
+    
     test_update_group_epoch(group['group_id_b64'], group['epoch'], bob_token, group['epoch_secret'])
     
     # Bob sends a message
@@ -375,6 +203,21 @@ def complete_distributed_flow():
         print(f"✅ Alice found group: {target_group['group_name']}")
         print(f"   Her leaf index: {target_group['my_leaf_index']}")
         print(f"   Current epoch: {target_group['epoch']}")
+
+        epoch_secret_from_welcome = group["epoch_secret"]  # This is from Bob's session
+    
+        # Create Alice's group state
+        alice_group_state = {
+            "group_id_b64": target_group['group_id'],
+            "group_id": base64.b64decode(target_group['group_id']),
+            "epoch": target_group['epoch'],
+            "my_leaf_index": target_group['my_leaf_index'],
+            "epoch_secret": epoch_secret_from_welcome,  # From Welcome message
+            # Note: In a real implementation, Alice would also reconstruct the ratchet tree
+            "tree": None  # Would come from GroupInfo in Welcome message
+        }
+        
+        print(f"✅ Alice reconstructed group state")
         
         # Alice needs the epoch secret to decrypt messages
         # In MLS, this comes from the Welcome message
@@ -406,4 +249,9 @@ def complete_distributed_flow():
                     print(f"   Alice read: '{decrypted}'")
 
 if __name__ == "__main__":
-    run_full_flow()
+    # 1. Register users
+    print("\n📝 STEP 1: Registering users")
+    alice_id, alice_token = register_user("alice", "1234")
+    bob_id, bob_token = register_user("bob", "1234")
+
+    complete_distributed_flow()

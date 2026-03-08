@@ -343,6 +343,103 @@ def test_get_my_groups(token: str):
             print("Response body:", e.response.text)
         return None
     
+def get_user_by_username(username: str, token: str = None):
+    """
+    Get user information by username.
+    If token is provided, it's used for authentication.
+    If no token, attempts without authentication (if endpoint allows).
+    """
+    print(f"\n=== Looking up user: {username} ===")
+    
+    url = f"{BASE_URL}/users?username={username}"
+    headers = {}
+    
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        r = requests.get(
+            url,
+            headers=headers
+        )
+        r.raise_for_status()
+        response_data = r.json()
+        
+        users = response_data.get('users', [])
+        if users:
+            user = users[0]  # Take the first match
+            print(f"✅ Found user: {user['username']} (ID: {user['user_id']})")
+            return user
+        else:
+            print(f"❌ No user found with username: {username}")
+            return None
+            
+    except Exception as e:
+        print(f"FAILED: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print("Response body:", e.response.text)
+        return None
+
+def get_user_by_id(user_id: str, token: str = None):
+    """
+    Get user information by user ID.
+    """
+    print(f"\n=== Looking up user by ID: {user_id} ===")
+    
+    url = f"{BASE_URL}/users/{user_id}"
+    headers = {}
+    
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        r = requests.get(
+            url,
+            headers=headers
+        )
+        r.raise_for_status()
+        user_data = r.json()
+        print(f"✅ Found user: {user_data['username']}")
+        return user_data
+        
+    except Exception as e:
+        print(f"FAILED: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print("Response body:", e.response.text)
+        return None
+
+def search_users(search_term: str, token: str = None):
+    """
+    Search for users by username (partial matches).
+    """
+    print(f"\n=== Searching for users matching: {search_term} ===")
+    
+    url = f"{BASE_URL}/users?search={search_term}"
+    headers = {}
+    
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        r = requests.get(
+            url,
+            headers=headers
+        )
+        r.raise_for_status()
+        response_data = r.json()
+        
+        users = response_data.get('users', [])
+        print(f"✅ Found {len(users)} matching users")
+        for user in users:
+            print(f"   - {user['username']} (ID: {user['user_id']})")
+        return users
+        
+    except Exception as e:
+        print(f"FAILED: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print("Response body:", e.response.text)
+        return []
+        
 if __name__ == "__main__":
     print("=== Database & API Integration Test ===\n")
     print("Make sure:")

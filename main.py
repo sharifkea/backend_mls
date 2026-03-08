@@ -100,7 +100,96 @@ async def register_user(user: UserCreate):
         if not user_id:
             raise HTTPException(status_code=400, detail="Username already exists")
     return {"status": "registered", "user_id": str(user_id)}
+@app.get("/users")
+async def get_users(
+    username: Optional[str] = None,
+    search: Optional[str] = None,
+    token: str = Depends(oauth2_scheme)
+):
+    """
+    Get users information.
+    - If username is provided, exact match
+    - If search is provided, partial match
+    - If neither, returns all users
+    """
+    # Verify token
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        requester_id = payload["user_id"]
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with db.connection() as conn:
+        if username:
+            # Exact match by username
+            rows = await conn.fetch(
+                "SELECT user_id, username, created_at FROM users WHERE username = $1",
+                username
+            )
+        elif search:
+            # Partial match (case-insensitive)
+            rows = await conn.fetch(
+                "SELECT user_id, username, created_at FROM users WHERE username ILIKE $1",
+                f"%{search}%"
+            )
+        else:
+            # All users (limit to 100 for performance)
+            rows = await conn.fetch(
+                "SELECT user_id, username, created_at FROM users ORDER BY created_at DESC LIMIT 100"
+            )
+    
+    return {
+        "users": [
+            {
+                "user_id": str(row["user_id"]),
+                "username": row["username"],
+                "created_at": row["created_at"].isoformat()
+            }
+            for row in rows
+        ]
+    }
 
+@app.get("/users/{user_id}")
+async def get_user_by_id(
+    user_id: UUID,
+    token: str = Depends(oauth2_scheme)
+):
+    """
+    Get a specific user by ID.
+    """
+    # Verify token
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        requester_id = payload["user_id"]
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with db.connection() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 
+                user_id, 
+                username, 
+                created_at,
+                last_active,
+                (SELECT COUNT(*) FROM group_members WHERE user_id = $1 AND is_active = TRUE) as group_count
+            FROM users 
+            WHERE user_id = $1
+            """,
+            str(user_id)
+        )
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "user_id": str(row["user_id"]),
+            "username": row["username"],
+            "created_at": row["created_at"].isoformat(),
+            "last_active": row["last_active"].isoformat(),
+            "group_count": row["group_count"]
+        }
+    
 @app.post("/login")
 async def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
     async with db.connection() as conn:
