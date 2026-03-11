@@ -194,49 +194,6 @@ async def get_user_by_id(
             "last_active": row["last_active"].isoformat(),
             "group_count": row["group_count"]
         }
-@app.get("/users/me/groups")
-async def get_my_groups(token: str = Depends(oauth2_scheme)):
-    """Get all groups for current user with membership details"""
-    user_id = verify_token(token)
-    
-    async with db.connection() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT 
-                g.group_id,
-                g.group_name,
-                g.last_epoch,
-                g.cipher_suite,
-                COUNT(DISTINCT gm_all.user_id) as member_count,
-                MAX(m.created_at) as last_message_at,
-                gm.leaf_index as my_leaf_index,
-                gm.joined_at as my_joined_at
-            FROM groups g
-            JOIN group_members gm ON g.group_id = gm.group_id AND gm.user_id = $1
-            LEFT JOIN group_members gm_all ON g.group_id = gm_all.group_id AND gm_all.is_active = TRUE
-            LEFT JOIN messages m ON g.group_id = m.group_id
-            WHERE gm.is_active = TRUE
-            GROUP BY g.group_id, g.group_name, g.last_epoch, g.cipher_suite, gm.leaf_index, gm.joined_at
-            ORDER BY g.last_updated DESC
-            """,
-            user_id
-        )
-    
-    return {
-        "groups": [
-            {
-                "group_id": base64.b64encode(row["group_id"]).decode('ascii'),
-                "group_name": row["group_name"],
-                "cipher_suite": row["cipher_suite"],
-                "epoch": row["last_epoch"],
-                "member_count": row["member_count"],
-                "last_message_at": row["last_message_at"].isoformat() if row["last_message_at"] else None,
-                "my_leaf_index": row["my_leaf_index"],  # 🔑 Alice's leaf index in this group
-                "my_joined_at": row["my_joined_at"].isoformat()
-            }
-            for row in rows
-        ]
-    }
     
 @app.post("/login")
 async def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -355,203 +312,181 @@ async def delete_user(user_id: UUID, token: str = Depends(oauth2_scheme)):
 
 @app.post("/groups")
 async def create_group(group: GroupCreate, token: str = Depends(oauth2_scheme)):
-    """Create a new MLS group"""
+    """Create a new MLS group - accepts client-generated group ID"""
     user_id = verify_token(token)
     
-    # Check if client provided a group_id
+    # Use client-provided group_id if available
     if group.group_id:
         try:
-            # Try to decode as base64 first
             group_id_bytes = base64.b64decode(group.group_id)
-            print(f"Decoded base64 group_id: {len(group_id_bytes)} bytes")
-            
-            # Verify it's 16 bytes
             if len(group_id_bytes) != 16:
                 raise HTTPException(status_code=400, detail="Group ID must be 16 bytes")
-                
+            print(f"Using client-provided group ID: {group.group_id}")
         except Exception as e:
-            # If base64 fails, try hex
-            try:
-                if len(group.group_id) == 32:  # 16 bytes in hex = 32 chars
-                    group_id_bytes = bytes.fromhex(group.group_id)
-                    print(f"Decoded hex group_id: {len(group_id_bytes)} bytes")
-                else:
-                    raise HTTPException(status_code=400, detail="Invalid group_id format")
-            except:
-                raise HTTPException(status_code=400, detail="Invalid group_id format")
+            raise HTTPException(status_code=400, detail=f"Invalid group_id format: {e}")
     else:
-        # Generate new group_id
+        # Fall back to server-generated ID
         group_id_bytes = secrets.token_bytes(16)
+        print("Generated new group ID")
     
-    # Rest of your code...
     async with db.connection() as conn:
-        success = await conn.fetchval(
-            "SELECT create_group($1, $2, $3, $4)",
-            group_id_bytes, group.group_name, user_id, group.cipher_suite
-        )
-    
-    return {
-        "status": "created",
-        "group_id": base64.b64encode(group_id_bytes).decode('ascii')
-    }
+        try:
+            success = await conn.fetchval(
+                "SELECT create_group($1, $2, $3, $4)",
+                group_id_bytes, group.group_name, user_id, group.cipher_suite
+            )
+            return {
+                "status": "created",
+                "group_id": base64.b64encode(group_id_bytes).decode('ascii')
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/groups/{group_id}/members")
-async def add_group_member(
-    group_id: str,  # This can be hex or base64
-    request: AddMemberRequest,
-    token: str = Depends(oauth2_scheme)
-):
+async def add_group_member(group_id: str, request: AddMemberRequest, token: str = Depends(oauth2_scheme)):
     """Add a member to a group"""
     user_id = verify_token(token)
-    
-    # Try to decode as hex first, then base64
-    try:
-        # Try hex first
-        if len(group_id) == 32:  # 16 bytes = 32 hex chars
-            group_id_bytes = bytes.fromhex(group_id)
-        else:
-            # Try base64
-            group_id_bytes = base64.b64decode(group_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid group_id format")
+    group_id_bytes = base64.b64decode(group_id)
     
     async with db.connection() as conn:
-        # Your existing code...
-        result = await conn.fetchval(
+        await conn.fetchval(
             "SELECT add_group_member($1, $2, $3, $4)",
             group_id_bytes, request.user_id, request.leaf_index, user_id
         )
-        
-        return {"status": "member_added"}
     
+    return {"status": "member_added"}
+
 @app.get("/groups/{group_id}")
-async def get_group_details_endpoint(
-    group_id: str,
-    token: str = Depends(oauth2_scheme)
-):
-    """Get detailed information about a group"""
-    user_id = verify_token(token)
-    
-    try:
-        group_id_bytes = base64.b64decode(group_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid group_id format")
+async def get_group(group_id: str, token: str = Depends(oauth2_scheme)):
+    """Get group details"""
+    verify_token(token)  # Just verify, don't need user_id
+    group_id_bytes = base64.b64decode(group_id)
     
     async with db.connection() as conn:
-        # Call your SQL function
         row = await conn.fetchrow(
             "SELECT * FROM get_group_details($1)",
             group_id_bytes
         )
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="Group not found")
-        
-        return {
-            "group_id": group_id,
-            "group_name": row["group_name"],
-            "creator_user_id": str(row["creator_user_id"]),
-            "creator_username": row["creator_username"],
-            "cipher_suite": row["cipher_suite"],
-            "last_epoch": row["last_epoch"],
-            "created_at": row["created_at"].isoformat(),
-            "member_count": row["member_count"]
-        }
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    return {
+        "group_id": group_id,
+        "group_name": row["group_name"],
+        "creator_user_id": str(row["creator_user_id"]),
+        "creator_username": row["creator_username"],
+        "cipher_suite": row["cipher_suite"],
+        "epoch": row["last_epoch"],
+        "created_at": row["created_at"],
+        "member_count": row["member_count"]
+    }
 
-@app.post("/groups/{group_id}/epoch-secret")
-async def store_epoch_secret(
-    group_id: str,
-    epoch: int = Body(...),
-    epoch_secret: str = Body(...),
-    token: str = Depends(oauth2_scheme)
-):
-    """Store epoch secret for a group (encrypted in production!)"""
+@app.get("/users/me/groups")
+async def get_my_groups(token: str = Depends(oauth2_scheme)):
+    """Get all groups for current user with membership details"""
     user_id = verify_token(token)
     
-    try:
-        group_id_bytes = base64.b64decode(group_id)
-        secret_bytes = base64.b64decode(epoch_secret)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid encoding")
-    
     async with db.connection() as conn:
-        # Verify user is a member
-        is_member = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
-            group_id_bytes, user_id
-        )
-        
-        if not is_member:
-            raise HTTPException(status_code=403, detail="Not a group member")
-        
-        # Store epoch secret
-        await conn.execute(
-            """
-            INSERT INTO epoch_secrets (group_id, epoch, epoch_secret, created_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (group_id, epoch) DO UPDATE 
-            SET epoch_secret = EXCLUDED.epoch_secret
-            """,
-            group_id_bytes, epoch, secret_bytes
-        )
-        
-        return {"status": "stored", "epoch": epoch}
-
-
-@app.get("/groups/{group_id}/members")
-async def get_group_members_endpoint(
-    group_id: str,
-    token: str = Depends(oauth2_scheme)
-):
-    """Get all members of a group"""
-    user_id = verify_token(token)
-    
-    try:
-        group_id_bytes = base64.b64decode(group_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid group_id format")
-    
-    async with db.connection() as conn:
-        # Verify user is a member
-        is_member = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
-            group_id_bytes, user_id
-        )
-        
-        if not is_member:
-            raise HTTPException(status_code=403, detail="Not a group member")
-        
-        # Get all members using SQL function or direct query
         rows = await conn.fetch(
             """
             SELECT 
-                gm.user_id,
-                u.username,
-                gm.leaf_index,
-                gm.joined_at,
-                gm.is_active
-            FROM group_members gm
-            JOIN users u ON gm.user_id = u.user_id
-            WHERE gm.group_id = $1 AND gm.is_active = TRUE
-            ORDER BY gm.leaf_index
+                g.group_id,
+                g.group_name,
+                g.last_epoch,
+                g.cipher_suite,
+                COUNT(DISTINCT gm_all.user_id) as member_count,
+                MAX(m.created_at) as last_message_at,
+                gm.leaf_index as my_leaf_index,
+                gm.joined_at as my_joined_at
+            FROM groups g
+            JOIN group_members gm ON g.group_id = gm.group_id AND gm.user_id = $1
+            LEFT JOIN group_members gm_all ON g.group_id = gm_all.group_id AND gm_all.is_active = TRUE
+            LEFT JOIN messages m ON g.group_id = m.group_id
+            WHERE gm.is_active = TRUE
+            GROUP BY g.group_id, g.group_name, g.last_epoch, g.cipher_suite, gm.leaf_index, gm.joined_at
+            ORDER BY g.last_updated DESC
             """,
-            group_id_bytes
+            user_id
         )
-        
-        return {
-            "group_id": group_id,
-            "members": [
-                {
-                    "user_id": str(row["user_id"]),
-                    "username": row["username"],
-                    "leaf_index": row["leaf_index"],
-                    "joined_at": row["joined_at"].isoformat() if row["joined_at"] else None,
-                    "is_active": row["is_active"]
-                }
-                for row in rows
-            ]
-        }
     
+    return {
+        "groups": [
+            {
+                "group_id": base64.b64encode(row["group_id"]).decode('ascii'),
+                "group_name": row["group_name"],
+                "cipher_suite": row["cipher_suite"],
+                "epoch": row["last_epoch"],
+                "member_count": row["member_count"],
+                "last_message_at": row["last_message_at"].isoformat() if row["last_message_at"] else None,
+                "my_leaf_index": row["my_leaf_index"],  # 🔑 Alice's leaf index in this group
+                "my_joined_at": row["my_joined_at"].isoformat()
+            }
+            for row in rows
+        ]
+    }
+
+@app.post("/messages")
+async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)):
+    """Store an encrypted message"""
+    user_id = verify_token(token)
+    
+    # Decode data
+    group_id_bytes = base64.b64decode(message.group_id)
+    ciphertext_bytes = base64.b64decode(message.ciphertext)
+    nonce_bytes = base64.b64decode(message.nonce)
+    auth_data = base64.b64decode(message.authenticated_data) if message.authenticated_data else b''
+    enc_sender = base64.b64decode(message.encrypted_sender_data) if message.encrypted_sender_data else b''
+    
+    async with db.connection() as conn:
+        message_id = await conn.fetchval(
+            """
+            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
+            group_id_bytes, user_id, message.epoch, ciphertext_bytes, nonce_bytes,
+            message.content_type, auth_data, enc_sender, message.wire_format
+        )
+    
+    return {
+        "status": "stored",
+        "message_id": str(message_id)
+    }
+
+@app.get("/groups/{group_id}/messages")
+async def get_messages(
+    group_id: str, 
+    since_epoch: Optional[int] = None,
+    limit: int = 100,
+    token: str = Depends(oauth2_scheme)
+):
+    """Get messages from a group"""
+    user_id = verify_token(token)
+    group_id_bytes = base64.b64decode(group_id)
+    
+    async with db.connection() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM get_group_messages($1, $2, $3, $4)",
+            group_id_bytes, user_id, since_epoch, limit
+        )
+    
+    return {
+        "messages": [
+            {
+                "message_id": str(row["message_id"]),
+                "sender_user_id": str(row["sender_user_id"]),
+                "sender_username": row["sender_username"],
+                "sender_leaf_index": row["sender_leaf_index"],
+                "epoch": row["epoch"],
+                "ciphertext": base64.b64encode(row["ciphertext"]).decode('ascii'),
+                "nonce": base64.b64encode(row["nonce"]).decode('ascii'),
+                "content_type": row["content_type"],
+                "created_at": row["created_at"].isoformat()
+            }
+            for row in rows
+        ]
+    }
+
+
 @app.post("/groups/{group_id}/epoch")
 async def update_epoch(
     group_id: str,
@@ -579,6 +514,12 @@ def verify_token(token: str) -> str:
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
     
+@app.get("/test-db")
+async def test_db():
+    async with db.connection() as conn:
+        version = await conn.fetchval("SELECT version()")
+        return {"status": "connected", "postgres_version": version}
+
 @app.get("/groups/{group_id}/messages")
 async def get_group_messages_debug(
     group_id: str,
@@ -676,35 +617,3 @@ async def get_group_messages_debug(
     except Exception as e:
         print(f"Database connection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
-@app.post("/messages")
-async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)):
-    """Store an encrypted message"""
-    user_id = verify_token(token)
-    
-    # Decode data
-    group_id_bytes = base64.b64decode(message.group_id)
-    ciphertext_bytes = base64.b64decode(message.ciphertext)
-    nonce_bytes = base64.b64decode(message.nonce)
-    auth_data = base64.b64decode(message.authenticated_data) if message.authenticated_data else b''
-    enc_sender = base64.b64decode(message.encrypted_sender_data) if message.encrypted_sender_data else b''
-    
-    async with db.connection() as conn:
-        message_id = await conn.fetchval(
-            """
-            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            """,
-            group_id_bytes, user_id, message.epoch, ciphertext_bytes, nonce_bytes,
-            message.content_type, auth_data, enc_sender, message.wire_format
-        )
-    
-    return {
-        "status": "stored",
-        "message_id": str(message_id)
-    }
-
-@app.get("/test-db")
-async def test_db():
-    async with db.connection() as conn:
-        version = await conn.fetchval("SELECT version()")
-        return {"status": "connected", "postgres_version": version}

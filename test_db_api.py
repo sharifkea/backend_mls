@@ -275,35 +275,31 @@ def test_get_group_messages(group_id: str, token: str, since_epoch: int = None, 
             print("Response body:", e.response.text)
         return None
 
+
 def test_update_group_epoch(group_id: str, new_epoch: int, token: str, epoch_secret: bytes = None):
-    """Update group to new epoch - using query parameter"""
     print(f"\n=== Updating group {group_id} to epoch {new_epoch} ===")
-    
-    # Build URL with query parameter
-    url = f"{BASE_URL}/groups/{group_id}/epoch?new_epoch={new_epoch}"
-    
-    # Prepare optional body for epoch_secret
-    payload = {}
+
+    url = f"{BASE_URL}/groups/{group_id}/epoch"
+    payload = {"new_epoch": new_epoch}
+
     if epoch_secret:
         import base64
         payload["epoch_secret"] = base64.b64encode(epoch_secret).decode('ascii')
-    
-    try:
-        # Use params for query string, json for body
-        r = requests.post(
-            url,
-            json=payload if payload else None,
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        r.raise_for_status()
-        print("SUCCESS: Group epoch updated")
-        print("Response:", r.json())
-        return True
-    except Exception as e:
-        print("FAILED:", str(e))
-        if hasattr(e, 'response') and e.response is not None:
-            print("Response body:", e.response.text)
+
+        try:
+            r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {token}"})
+            r.raise_for_status()
+            print("SUCCESS: Group epoch updated")
+            print("Response:", r.json())
+            return True
+        except Exception as e:
+            print("FAILED:", str(e))
+            return False
+
+    else:
+        print("No epoch_secret provided, skipping update")
         return False
+
 
 def test_get_group_details(group_id: str, token: str):
     """Get detailed information about a group"""
@@ -461,4 +457,5 @@ if __name__ == "__main__":
                     test_mark_used(ref_hash)
                     test_cleanup()
                     bool_ret=test_delete_user(user_id, token)
+                    
     

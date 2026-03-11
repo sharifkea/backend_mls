@@ -132,6 +132,15 @@ def add_member(group, new_member_id, committer_priv_bytes, committer_index=0):
     
     print(f"  New epoch: {group['epoch']}")
     return True
+def run_reg_flwo():
+    # 1. Register users
+    print("\n📝 STEP 1: Registering users")
+    alice_id= register_user("alice", "1234")
+    bob_id = register_user("bob", "1234")
+    
+    if not alice_id or not bob_id:
+        print("❌ Failed to register users")
+        return
 
 def run_full_flow():
     """Run complete MLS flow with database persistence"""
@@ -139,15 +148,10 @@ def run_full_flow():
     print("\n" + "="*60)
     print("COMPLETE MLS FLOW WITH DATABASE PERSISTENCE")
     print("="*60)
-    
-    # 1. Register users
-    print("\n📝 STEP 1: Registering users")
-    alice_id, alice_token = register_user("alice", "1234")
-    bob_id, bob_token = register_user("bob", "1234")
-    
-    if not alice_id or not bob_id:
-        print("❌ Failed to register users")
-        return
+
+    alice_id, alice_token=test_user_login("alice", "1234")
+    bob_id, bob_token=test_user_login("bob", "1234")
+
     
     # 2. Generate and upload key packages
     print("\n🔑 STEP 2: Uploading key packages")
@@ -190,12 +194,16 @@ def run_full_flow():
     test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token)
     
     # Update epoch in database
-    test_update_group_epoch(
+    print("\n🔄 Updating group epoch in database after adding Alice")
+    if (test_update_group_epoch(
         group['group_id_b64'], 
         group['epoch'],  # Should be 1 after add_member
         bob_token, 
         group['epoch_secret']
-    )
+    )):
+        print("✅ Group epoch updated in database")
+    else:
+        print("❌ Failed to update group epoch in database")
     
     # 5. Bob sends an encrypted message
     print("\n💬 STEP 5: Bob sends encrypted message")
@@ -312,10 +320,13 @@ def run_full_flow():
 def register_user(username, password):
     """Helper to register and login a user"""
     user_id = test_user_registration(username, password)
-    if user_id:
-        return test_user_login(username, password)
-    return None, None
+    if not user_id:
+        print(f"❌ Registration failed for {username}")
+        return None, None
+        
+    return user_id
 
 
 if __name__ == "__main__":
+    run_reg_flwo()
     run_full_flow()

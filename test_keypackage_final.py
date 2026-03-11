@@ -168,9 +168,9 @@ def GeneratKeyPackage(user_id: str):
     except Exception as e:
         print("Serialization failed:", str(e))
 def main():
-    alice_priv_bytes = GeneratKeyPackage("alice")
+    #alice_priv_bytes = GeneratKeyPackage("alice")
     bob_priv_bytes = GeneratKeyPackage("bob")
-    print(f"Alice's private key: {alice_priv_bytes.hex()}")
+    #print(f"Alice's private key: {alice_priv_bytes.hex()}")
     print(f"Bob's private key: {bob_priv_bytes.hex()}")
 if __name__ == "__main__":
     main()
