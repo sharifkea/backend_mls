@@ -556,7 +556,7 @@ async def get_group_members_endpoint(
 async def update_epoch(
     group_id: str,
     payload: EpochUpdate,                    # <-- body
-    token: str = Depends(oauth2_scheme),
+    token: str = Depends(oauth2_scheme)
 ):
     """Update group to new epoch"""
     user_id = verify_token(token)
@@ -677,6 +677,98 @@ async def get_group_messages_debug(
         print(f"Database connection error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
+@app.post("/groups/{group_id}/welcome")
+async def store_welcome(
+    group_id: str,                      # this is base64 string from frontend
+    payload: dict,
+    token: str = Depends(oauth2_scheme)
+):
+    user_id = verify_token(token)       # your function that returns UUID
+
+    # 1. Decode group_id (base64 → raw bytes)
+    try:
+        group_id_bytes = base64.b64decode(group_id)
+    except Exception:
+        raise HTTPException(400, "Invalid group_id (must be valid base64)")
+
+    # 2. Decode welcome (base64 → bytes)
+    try:
+        welcome_bytes = base64.b64decode(payload["welcome_b64"])
+    except Exception:
+        raise HTTPException(400, "Invalid welcome_b64 (must be valid base64)")
+
+    # 3. Get target user
+    try:
+        to_user_id = UUID(payload["to_user_id"])
+    except Exception:
+        raise HTTPException(400, "Invalid to_user_id (must be valid UUID)")
+    
+    print(f"Received group_id (b64): {group_id}")
+    print(f"Decoded group_id_bytes len: {len(group_id_bytes)}")
+    print(f"Received welcome_b64 len: {len(payload['welcome_b64'])}")
+    print(f"Decoded welcome_bytes len: {len(welcome_bytes)}")
+    print(f"Target user: {to_user_id}")
+
+    async with db.connection() as conn:
+        # Optional: verify caller is member (good security)
+        is_member = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
+            group_id_bytes, user_id
+        )
+        if not is_member:
+            raise HTTPException(403, "Not a member of this group")
+
+        # Insert / update
+        result = await conn.execute(
+            """
+            INSERT INTO pending_welcomes (group_id, to_user_id, welcome)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (group_id, to_user_id) 
+            DO UPDATE SET
+                welcome = EXCLUDED.welcome,
+                created_at = NOW(),
+                delivered = FALSE
+            """,
+            group_id_bytes,         # BYTEA
+            to_user_id,             # UUID
+            welcome_bytes           # BYTEA
+        )
+
+        print(f"Executed query - affected rows: {result}")
+
+        if result == 0:
+            raise HTTPException(500, "No rows affected - possible constraint violation")
+
+    return {"status": "stored"}
+
+@app.get("/pending-welcomes")
+async def get_pending_welcomes(token: str = Depends(oauth2_scheme)):
+    user_id = verify_token(token)
+    print(f"Token: {token}")
+    print(f"Fetching pending welcomes for user_id: {user_id}")
+    async with db.connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                encode(group_id, 'base64') AS group_id_b64,
+                welcome
+            FROM pending_welcomes
+            WHERE to_user_id = $1 AND delivered = FALSE
+            ORDER BY created_at DESC
+            """,
+            user_id
+        )
+    
+    return {
+        "welcomes": [
+            {
+                "group_id": row["group_id_b64"],
+                "welcome_b64": base64.b64encode(row["welcome"]).decode('ascii')
+            }
+            for row in rows
+        ]
+    }
+    
 @app.post("/messages")
 async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)):
     """Store an encrypted message"""
@@ -703,8 +795,11 @@ async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)
         "message_id": str(message_id)
     }
 
+
+
 @app.get("/test-db")
 async def test_db():
     async with db.connection() as conn:
         version = await conn.fetchval("SELECT version()")
         return {"status": "connected", "postgres_version": version}
+    

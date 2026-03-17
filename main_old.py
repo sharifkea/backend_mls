@@ -491,7 +491,7 @@ async def get_messages(
 async def update_epoch(
     group_id: str,
     payload: EpochUpdate,                    # <-- body
-    token: str = Depends(oauth2_scheme),
+    token: str = Depends(oauth2_scheme)
 ):
     """Update group to new epoch"""
     user_id = verify_token(token)

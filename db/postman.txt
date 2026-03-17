@@ -1,0 +1,45 @@
+curl --location 'https://api.example.com/users/me/groups' \
+--header 'Content-Type: application/json' \
+--header 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZDU5ZWU3MTQtYjMxNC00NTY3LTgwOTMtNjllZGRjM2RiNDIxIiwiZXhwIjoxNzczNjA3NjkyfQ.ovwBUWsw4MfYF4ReOdwkD0N-WTitBFt0iPCHjC1gBa8'
+
+http://localhost:8000/docs
+
+┌───────────────────────────────────────────────────┐
+│                    WELCOME MESSAGE FLOW                          │
+├───────────────────────────────────────────────────┤
+│                                                                   │
+│  GROUP CREATOR                  DATABASE                 NEW USER │
+│  (e.g., Bob)                                                      │
+│                                                                   │
+│  Creates group                                                    │
+│  Adds members                                                     │
+│  Generates Welcome messages                                       │
+│         │                                                         │
+│         └──[POST /groups/{id}/welcome]──┐                       │
+│                                           ↓                       │
+│                                      pending_welcomes             │
+│                                      table stores                 │
+│                                      welcome for each user        │
+│                                           ↑                       │
+│  ┌──────────────────────────────┘                       │
+│  │                                                               │
+│  │                          ┌─[GET /pending-welcomes]──┐        │
+│  │                          │                           │        │
+│  │                          ↓                           ↓        │
+│  │                    Alice logs in               Charlie logs in│
+│  │                    fetches welcomes           fetches welcomes│
+│  │                         │                           │        │
+│  │                         └─────┬───────────────┘        │
+│  │                               ↓                               │
+│  │                    process_pending_welcomes()                 │
+│  │                    (decrypts with their private key)          │
+│  │                               ↓                               │
+│  │                    Join group cryptographically               │
+│  │                    Store group state locally                  │
+│  │                               ↓                               │
+│  │                    Ready to send/receive messages             │
+└───────────────────────────────────────────────────┘
+
+
+
+
