@@ -655,30 +655,30 @@ async def get_group_messages_debug(
             
             # Test 2: Check if group exists
             group_exists = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = $1)",
-                group_id_bytes
+                "SELECT EXISTS(SELECT 1 FROM groups where group_id=decode($1, 'hex'))",
+                group_id
             )
             print(f"Group exists in DB: {group_exists}")
             
             # Test 3: Check if user is member
             is_member = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
-                group_id_bytes, user_id
+                "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = decode($1, 'hex') AND user_id = $2)",
+                group_id, user_id
             )
             print(f"User is member: {is_member}")
             
             # Test 4: Count messages
             msg_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM messages WHERE group_id = $1",
-                group_id_bytes
+                "SELECT COUNT(*) FROM messages WHERE group_id = decode($1, 'hex')",
+                group_id
             )
             print(f"Messages in group: {msg_count}")
             
             # Now try the actual function
             try:
                 rows = await conn.fetch(
-                    "SELECT * FROM get_group_messages($1, $2, $3, $4)",
-                    group_id_bytes, user_id, since_epoch, limit
+                    "SELECT * FROM get_group_messages(decode($1, 'hex'), $2, $3, $4)",
+                    group_id, user_id, since_epoch, limit
                 )
                 print(f"Query returned {len(rows)} rows")
                 
@@ -838,28 +838,61 @@ async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)
     }
 
 
-
 @app.get("/test-db")
 async def test_db():
     async with db.connection() as conn:
         version = await conn.fetchval("SELECT version()")
         return {"status": "connected", "postgres_version": version}
     
-@app.get("/groups/{group_id}/epoch-secrets")
-async def get_epoch_secrets(
+@app.get("/groups/{group_id}/epoch-secrets/{epoch}")
+async def get_epoch_secret(
     group_id: str,
+    epoch: int,
     token: str = Depends(oauth2_scheme)
 ):
-    """Get all epoch secrets for a group"""
+    """Get a specific epoch secret"""
     user_id = verify_token(token)
     
     try:
+        # Try hex first (32 chars = 16 bytes)
         if len(group_id) == 32:
             group_id_bytes = bytes.fromhex(group_id)
+            print(f"Decoded as hex: {group_id}")
         else:
+            # Try base64
             group_id_bytes = base64.b64decode(group_id)
-    except:
-        raise HTTPException(400, "Invalid group_id")
+            print(f"Decoded as base64: {group_id}")
+    except Exception:
+        raise HTTPException(400, "Invalid group_id format")
+    
+    async with db.connection() as conn:
+        # Verify user is a member
+        is_member = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
+            group_id_bytes, user_id
+        )
+        
+        if not is_member:
+            raise HTTPException(403, "Not a group member")
+        else:
+            print("The user is a member of the group" )
+        
+        # Get epoch secret
+        row = await conn.fetchrow(
+            "SELECT epoch_secret FROM epoch_secrets WHERE group_id = $1 AND epoch = $2",
+            group_id_bytes, epoch
+        )
+        
+        if not row:
+            raise HTTPException(404, f"Epoch secret for epoch {epoch} not found")
+        else:
+            print("we get the Epoch Secret")
+        
+        return {
+            "epoch": epoch,
+            "epoch_secret": base64.b64encode(row["epoch_secret"]).decode('ascii')
+        }
+    
 @app.post("/welcome/{welcome_id}/delivered")
 async def mark_welcome_delivered(welcome_id: UUID, token: str = Depends(oauth2_scheme)):
     """Mark a welcome message as delivered"""
