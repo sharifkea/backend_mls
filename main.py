@@ -19,12 +19,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 
-class EpochUpdate(BaseModel):
-    new_epoch: int
-    epoch_secret: Optional[str] = None
-
 load_dotenv()  # loads .env file
-
 
 app = FastAPI()
 # Password hashing
@@ -82,6 +77,9 @@ class MarkUsedRequest(BaseModel):
     
 class UserDelete(BaseModel):
     user_id: UUID
+
+class EpochUpdate(BaseModel):
+    new_epoch: int
 
 @app.on_event("startup")
 async def startup():
@@ -527,78 +525,31 @@ async def get_group_members_endpoint(
                 for row in rows
             ]
         }
-    
-
-@app.post("/groups/{group_id}/epoch-secret")
-async def store_epoch_secret(
-    group_id: str,
-    payload: dict,
-    token: str = Depends(oauth2_scheme)
-):
-    user_id = verify_token(token)
-    
-    try:
-        # Try hex first (32 chars = 16 bytes)
-        if len(group_id) == 32:
-            group_id_bytes = bytes.fromhex(group_id)
-            print(f"Decoded as hex: {group_id}")
-        else:
-            # Try base64
-            group_id_bytes = base64.b64decode(group_id)
-            print(f"Decoded as base64: {group_id}")
-    except Exception:
-        raise HTTPException(400, "=======Invalid group_id format=======")
-    
-    # Rest of your code...
-    epoch = payload["epoch"]
-    #secret_b64 = payload["epoch_secret"]
-    #secret_bytes = base64.b64decode(secret_b64)
-    secret_bytes = base64.b64decode(payload["epoch_secret"])
-    
-    async with db.connection() as conn:
-        result = await conn.fetchval(
-            """
-            SELECT store_epoch_secret($1, $2, $3, $4)
-            """,
-            group_id_bytes,
-            user_id,
-            epoch,
-            secret_bytes
-        )
-        ret=dict(result)
-        #print(f"WWWWWWWWWWW: epoch: {result['epoch']}, secret_stored: {result['status']}")
-        # result is already jsonb → convert to dict
-        return dict(result)
-
-    
 
 @app.post("/groups/{group_id}/epoch")
 async def update_epoch(
     group_id: str,
-    payload: EpochUpdate,                    # <-- body
+    payload: EpochUpdate,  # Now only has new_epoch
     token: str = Depends(oauth2_scheme)
 ):
-    """Update group to new epoch"""
+    """Update group to new epoch - NO secret storage!"""
     user_id = verify_token(token)
     
     # Try to decode as hex first, then base64
     try:
-        # Try hex first (32 chars = 16 bytes)
         if len(group_id) == 32:
             group_id_bytes = bytes.fromhex(group_id)
             print(f"Decoded as hex: {group_id}")
         else:
-            # Try base64
             group_id_bytes = base64.b64decode(group_id)
             print(f"Decoded as base64: {group_id}")
     except Exception:
         raise HTTPException(400, "Invalid group_id format")
     
-    secret_bytes = base64.b64decode(payload.epoch_secret) if payload.epoch_secret else None
     async with db.connection() as conn:
         await conn.fetchval(
-            "SELECT update_group_epoch($1, $2, $3, $4)",
-            group_id_bytes, payload.new_epoch, user_id, secret_bytes
+            "SELECT update_group_epoch($1, $2, $3)",  # Only 3 parameters now
+            group_id_bytes, payload.new_epoch, user_id
         )
     return {"status": "updated", "new_epoch": payload.new_epoch}
 
@@ -843,55 +794,7 @@ async def test_db():
     async with db.connection() as conn:
         version = await conn.fetchval("SELECT version()")
         return {"status": "connected", "postgres_version": version}
-    
-@app.get("/groups/{group_id}/epoch-secrets/{epoch}")
-async def get_epoch_secret(
-    group_id: str,
-    epoch: int,
-    token: str = Depends(oauth2_scheme)
-):
-    """Get a specific epoch secret"""
-    user_id = verify_token(token)
-    
-    try:
-        # Try hex first (32 chars = 16 bytes)
-        if len(group_id) == 32:
-            group_id_bytes = bytes.fromhex(group_id)
-            print(f"Decoded as hex: {group_id}")
-        else:
-            # Try base64
-            group_id_bytes = base64.b64decode(group_id)
-            print(f"Decoded as base64: {group_id}")
-    except Exception:
-        raise HTTPException(400, "Invalid group_id format")
-    
-    async with db.connection() as conn:
-        # Verify user is a member
-        is_member = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
-            group_id_bytes, user_id
-        )
-        
-        if not is_member:
-            raise HTTPException(403, "Not a group member")
-        else:
-            print("The user is a member of the group" )
-        
-        # Get epoch secret
-        row = await conn.fetchrow(
-            "SELECT epoch_secret FROM epoch_secrets WHERE group_id = $1 AND epoch = $2",
-            group_id_bytes, epoch
-        )
-        
-        if not row:
-            raise HTTPException(404, f"Epoch secret for epoch {epoch} not found")
-        else:
-            print("we get the Epoch Secret")
-        
-        return {
-            "epoch": epoch,
-            "epoch_secret": base64.b64encode(row["epoch_secret"]).decode('ascii')
-        }
+
     
 @app.post("/welcome/{welcome_id}/delivered")
 async def mark_welcome_delivered(welcome_id: UUID, token: str = Depends(oauth2_scheme)):

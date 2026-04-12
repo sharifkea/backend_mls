@@ -490,18 +490,28 @@ async def get_messages(
 @app.post("/groups/{group_id}/epoch")
 async def update_epoch(
     group_id: str,
-    payload: EpochUpdate,                    # <-- body
+    payload: EpochUpdate,  # Now only has new_epoch
     token: str = Depends(oauth2_scheme)
 ):
-    """Update group to new epoch"""
+    """Update group to new epoch - NO secret storage!"""
     user_id = verify_token(token)
-    group_id_bytes = base64.b64decode(group_id)
-    secret_bytes = base64.b64decode(payload.epoch_secret) if payload.epoch_secret else None
+    
+    # Decode group_id (could be hex or base64)
+    try:
+        if len(group_id) == 32:  # Hex encoded (16 bytes)
+            group_id_bytes = bytes.fromhex(group_id)
+        else:  # Try base64
+            group_id_bytes = base64.b64decode(group_id)
+    except Exception:
+        raise HTTPException(400, "Invalid group_id format")
+    
     async with db.connection() as conn:
+        # Call the updated function (no epoch_secret parameter)
         await conn.fetchval(
-            "SELECT update_group_epoch($1, $2, $3, $4)",
-            group_id_bytes, payload.new_epoch, user_id, secret_bytes
+            "SELECT update_group_epoch($1, $2, $3)",
+            group_id_bytes, payload.new_epoch, user_id
         )
+    
     return {"status": "updated", "new_epoch": payload.new_epoch}
 
 
