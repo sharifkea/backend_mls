@@ -1,5 +1,9 @@
 # main.py (FastAPI)
 import binascii
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import Dict
+import json
+import asyncio
 
 from fastapi import FastAPI, Body, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -10,6 +14,7 @@ from datetime import datetime, timedelta
 import jwt
 from fastapi.responses import Response
 from typing import Dict
+import pydantic
 from database import db
 import hashlib  # for ref_hash computation
 from pydantic import BaseModel
@@ -18,10 +23,22 @@ import base64, secrets
 import os
 from dotenv import load_dotenv
 from typing import Optional
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+
+
 
 load_dotenv()  # loads .env file
 
 app = FastAPI()
+# Add this after creating the FastAPI app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5000", "http://127.0.0.1:5000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -32,6 +49,65 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+# Connection manager for WebSocket
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.user_sessions: Dict[str, str] = {}  # user_id -> websocket client
+    
+    async def connect(self, websocket: WebSocket, user_id: str):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        print(f"✅ WebSocket connected: {user_id}")
+    
+    def disconnect(self, user_id: str):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            print(f"❌ WebSocket disconnected: {user_id}")
+    
+    async def send_to_user(self, user_id: str, message: dict):
+        if user_id in self.active_connections:
+            try:
+                await self.active_connections[user_id].send_json(message)
+                return True
+            except:
+                self.disconnect(user_id)
+        return False
+    
+    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str = None):
+        # You need to implement group membership lookup
+        # For now, broadcast to all
+        for user_id, connection in self.active_connections.items():
+            if user_id != exclude_user:
+                try:
+                    await connection.send_json(message)
+                except:
+                    pass
+
+    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str = None):
+        # Get group members from database
+        async with db.connection() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id FROM group_members WHERE group_id = decode($1, 'base64')",
+                group_id
+            )
+            for row in rows:
+                user_id = str(row["user_id"])
+                if user_id != exclude_user:
+                    await self.send_to_user(user_id, message)
+
+class GroupUpdateNotification(BaseModel):
+    group_id: str
+    update_data: dict
+    exclude_user: str
+
+class NewUserNotification(BaseModel):
+    creator_id: str
+    new_user_id: str
+    new_username: str
+    group_id: str
+    group_name: str
+    
 class GroupCreate(BaseModel):
     group_name: Optional[str] = None
     cipher_suite: int
@@ -81,6 +157,137 @@ class UserDelete(BaseModel):
 class EpochUpdate(BaseModel):
     new_epoch: int
 
+class JoinRequestNotification(BaseModel):
+    creator_id: str
+    requester_id: str
+    requester_username: str
+    group_id: str
+    group_name: str
+
+class MemberUpdateNotification(BaseModel):
+    user_id: str
+    group_id: str
+    update_data: dict
+
+manager = ConnectionManager()
+
+
+@app.post("/api/notify-join-request")
+async def notify_join_request(notification: JoinRequestNotification):
+    """Notify group creator about join request"""
+    
+    print(f"📢 Join request from {notification.requester_username} for group {notification.group_name}")
+    
+    if notification.creator_id in manager.active_connections:
+        await manager.send_to_user(notification.creator_id, {
+            'type': 'join_request',
+            'requester_id': notification.requester_id,
+            'requester_username': notification.requester_username,
+            'group_id': notification.group_id,
+            'group_name': notification.group_name
+        })
+        print(f"✅ Notified creator {notification.creator_id}")
+        return {"status": "notified"}
+    else:
+        print(f"⚠️ Creator {notification.creator_id} not connected")
+        return {"status": "creator_offline"}
+
+# WebSocket endpoint  
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: str):
+    # Optional: verify token from query params
+    token = websocket.query_params.get("token")
+    
+    # Verify token here if needed
+    # try:
+    #     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    #     if payload["user_id"] != user_id:
+    #         await websocket.close(code=4001)
+    #         return
+    # except:
+    #     await websocket.close(code=4001)
+    #     return
+    
+    await manager.connect(websocket, user_id)
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            msg_type = message.get("type")
+            
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+            
+            elif msg_type == "join_group":
+                group_id = message.get("group_id")
+                # Store group membership (optional)
+                print(f"User {user_id} joined group room: {group_id}")
+                await websocket.send_json({"type": "joined", "group_id": group_id})
+            
+            elif msg_type == "new_message":
+                group_id = message.get("group_id")
+                # Broadcast to group members (you need to implement group member lookup)
+                # For now, broadcast to all connected users
+                await manager.broadcast_to_group(group_id, {
+                    "type": "new_message",
+                    "group_id": group_id,
+                    "sender": user_id,
+                    "message": message.get("message")
+                }, exclude_user=user_id)
+            
+            elif msg_type == "user_online_check":
+                # Return list of online users
+                online_users = list(manager.active_connections.keys())
+                await websocket.send_json({
+                    "type": "online_users",
+                    "users": online_users
+                })
+                
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+        # Notify others
+        await manager.broadcast_to_group("all", {
+            "type": "user_offline",
+            "user_id": user_id
+        })
+
+@app.post("/api/notify-new-user")
+async def notify_new_user(notification: NewUserNotification):
+    """Receive notification from Flask about new user who should join a group"""
+    
+    # Send WebSocket message to the creator if they're connected
+    if notification.creator_id in manager.active_connections:
+        await manager.send_to_user(notification.creator_id, {
+            'type': 'new_user_ready_to_join',
+            'new_user_id': notification.new_user_id,
+            'new_username': notification.new_username,
+            'group_id': notification.group_id,
+            'group_name': notification.group_name
+        })
+        print(f"📢 Notified creator {notification.creator_id} about new user {notification.new_username}")
+    
+    return {"status": "notified"}
+
+@app.post("/api/notify-group-update")
+async def notify_member_update(notification: MemberUpdateNotification):
+    """Notify a specific member about group update"""
+    
+    print(f"📢 Attempting to notify member: {notification.user_id}")
+    print(f"   Active connections: {list(manager.active_connections.keys())}")
+    
+    if notification.user_id in manager.active_connections:
+        await manager.send_to_user(notification.user_id, {
+            'type': 'group_update',
+            'group_id': notification.group_id,
+            'update_data': notification.update_data
+        })
+        print(f"✅ Notified member {notification.user_id}")
+        return {"status": "notified"}
+    else:
+        print(f"⚠️ Member {notification.user_id} not connected (offline)")
+        return {"status": "offline"}
+    
 @app.on_event("startup")
 async def startup():
     await db.connect()
@@ -788,6 +995,46 @@ async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)
         "message_id": str(message_id)
     }
 
+@app.get("/api/groups/search")
+async def search_groups(
+    group_name: str,
+    token: str = Depends(oauth2_scheme)
+):
+    """Search for a group by name"""
+    user_id = verify_token(token)
+    
+    async with db.connection() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT 
+                g.group_id,
+                g.group_name,
+                g.creator_user_id,
+                u.username as creator_username,
+                g.last_epoch,
+                COUNT(gm.user_id) as member_count
+            FROM groups g
+            JOIN users u ON g.creator_user_id = u.user_id
+            LEFT JOIN group_members gm ON g.group_id = gm.group_id AND gm.is_active = TRUE
+            WHERE g.group_name ILIKE $1 AND g.is_active = TRUE
+            GROUP BY g.group_id, g.group_name, g.creator_user_id, u.username, g.last_epoch
+            """,
+            f"%{group_name}%"
+        )
+        
+        return {
+            "groups": [
+                {
+                    "group_id": base64.b64encode(row["group_id"]).decode('ascii'),
+                    "group_name": row["group_name"],
+                    "creator_user_id": str(row["creator_user_id"]),
+                    "creator_username": row["creator_username"],
+                    "last_epoch": row["last_epoch"],
+                    "member_count": row["member_count"]
+                }
+                for row in rows
+            ]
+        }
 
 @app.get("/test-db")
 async def test_db():
