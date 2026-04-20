@@ -124,16 +124,6 @@ class AddMemberRequest(BaseModel):
     user_id: str
     leaf_index: int
 
-class MessageSend(BaseModel):
-    group_id: str
-    ciphertext: str  # base64 encoded
-    nonce: str       # base64 encoded
-    epoch: int
-    content_type: int
-    authenticated_data: Optional[str] = None
-    encrypted_sender_data: Optional[str] = None
-    wire_format: int
-
 class MessageResponse(BaseModel):
     message_id: str
     group_id: str
@@ -171,6 +161,17 @@ class MemberUpdateNotification(BaseModel):
 
 manager = ConnectionManager()
 
+class MessageSend(BaseModel):
+    group_id: str
+    ciphertext: str
+    nonce: str
+    epoch: int
+    content_type: int
+    authenticated_data: Optional[str] = None
+    encrypted_sender_data: Optional[str] = None
+    wire_format: int
+    message_generation: int = 0  
+    sender_leaf_index: int
 
 @app.post("/api/notify-join-request")
 async def notify_join_request(notification: JoinRequestNotification):
@@ -771,14 +772,14 @@ def verify_token(token: str) -> str:
         raise HTTPException(status_code=401, detail="Invalid token")
     
 @app.get("/groups/{group_id}/messages")
-async def get_group_messages_debug(
+async def get_group_messages(
     group_id: str,
     since_epoch: Optional[int] = None,
     limit: int = 100,
     token: str = Depends(oauth2_scheme)
 ):
-    """Debug version to see what's happening"""
-    print(f"\n=== DEBUG: get_group_messages called ===")
+    """Get messages for a group with optional epoch filter"""
+    print(f"\n=== get_group_messages called ===")
     print(f"group_id: {group_id}")
     print(f"since_epoch: {since_epoch}")
     print(f"limit: {limit}")
@@ -792,81 +793,103 @@ async def get_group_messages_debug(
         print(f"Token error: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    # Decode group_id
+    # Decode group_id (hex format from URL)
     try:
-        group_id_bytes = base64.b64decode(group_id)
+        group_id_bytes = bytes.fromhex(group_id)
         print(f"Decoded group_id bytes: {group_id_bytes.hex()}")
         print(f"Decoded group_id length: {len(group_id_bytes)} bytes")
     except Exception as e:
-        print(f"Base64 decode error: {e}")
+        print(f"Hex decode error: {e}")
         raise HTTPException(status_code=400, detail="Invalid group_id format")
     
-    # Check database connection
-    try:
-        async with db.connection() as conn:
-            # Test 1: Check if user exists
-            user_exists = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE user_id = $1)",
-                user_id
+    async with db.connection() as conn:
+        # Verify user is a member
+        is_member = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2 AND is_active = TRUE)",
+            group_id_bytes, user_id
+        )
+        
+        if not is_member:
+            raise HTTPException(status_code=403, detail="Not a group member")
+        
+        # Build query based on since_epoch
+        if since_epoch is None:
+            # Get all messages
+            rows = await conn.fetch(
+                """
+                SELECT 
+                    m.message_id,
+                    encode(m.group_id, 'base64') as group_id_b64,
+                    m.sender_user_id,
+                    u.username as sender_username,
+                    m.sender_leaf_index,
+                    m.epoch,
+                    encode(m.ciphertext, 'base64') as ciphertext_b64,
+                    encode(m.nonce, 'base64') as nonce_b64,
+                    m.content_type,
+                    m.message_generation,
+                    m.created_at
+                FROM messages m
+                JOIN users u ON m.sender_user_id = u.user_id
+                WHERE m.group_id = $1 
+                    AND m.sender_user_id IN (
+                        SELECT user_id FROM group_members 
+                        WHERE group_id = $1 AND is_active = TRUE
+                    )
+                ORDER BY m.created_at ASC
+                LIMIT $2
+                """,
+                group_id_bytes, limit
             )
-            print(f"User exists in DB: {user_exists}")
-            
-            # Test 2: Check if group exists
-            group_exists = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM groups where group_id=decode($1, 'hex'))",
-                group_id
+        else:
+            # Get messages from specific epoch onwards
+            rows = await conn.fetch(
+                """
+                SELECT 
+                    m.message_id,
+                    encode(m.group_id, 'base64') as group_id_b64,
+                    m.sender_user_id,
+                    u.username as sender_username,
+                    m.sender_leaf_index,
+                    m.epoch,
+                    encode(m.ciphertext, 'base64') as ciphertext_b64,
+                    encode(m.nonce, 'base64') as nonce_b64,
+                    m.content_type,
+                    m.message_generation,
+                    m.created_at
+                FROM messages m
+                JOIN users u ON m.sender_user_id = u.user_id
+                WHERE m.group_id = $1 
+                    AND m.epoch >= $2
+                    AND m.sender_user_id IN (
+                        SELECT user_id FROM group_members 
+                        WHERE group_id = $1 AND is_active = TRUE
+                    )
+                ORDER BY m.created_at ASC
+                LIMIT $3
+                """,
+                group_id_bytes, since_epoch, limit
             )
-            print(f"Group exists in DB: {group_exists}")
-            
-            # Test 3: Check if user is member
-            is_member = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = decode($1, 'hex') AND user_id = $2)",
-                group_id, user_id
-            )
-            print(f"User is member: {is_member}")
-            
-            # Test 4: Count messages
-            msg_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM messages WHERE group_id = decode($1, 'hex')",
-                group_id
-            )
-            print(f"Messages in group: {msg_count}")
-            
-            # Now try the actual function
-            try:
-                rows = await conn.fetch(
-                    "SELECT * FROM get_group_messages(decode($1, 'hex'), $2, $3, $4)",
-                    group_id, user_id, since_epoch, limit
-                )
-                print(f"Query returned {len(rows)} rows")
-                
-                # Format response
-                messages = []
-                for row in rows:
-                    messages.append({
-                        "message_id": str(row["message_id"]),
-                        "group_id": group_id,
-                        "sender_user_id": str(row["sender_user_id"]),
-                        "sender_username": row["sender_username"],
-                        "sender_leaf_index": row["sender_leaf_index"],
-                        "epoch": row["epoch"],
-                        "ciphertext": base64.b64encode(row["ciphertext"]).decode('ascii'),
-                        "nonce": base64.b64encode(row["nonce"]).decode('ascii'),
-                        "content_type": row["content_type"],
-                        "created_at": row["created_at"].isoformat()
-                    })
-                
-                return {"messages": messages, "count": len(messages)}
-                
-            except Exception as e:
-                print(f"Database function error: {e}")
-                import traceback
-                traceback.print_exc()
-                raise HTTPException(status_code=500, detail=str(e))
-                
-    except Exception as e:
-        print(f"Database connection error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        
+        print(f"Query returned {len(rows)} rows")
+        
+        messages = []
+        for row in rows:
+            messages.append({
+                "message_id": str(row["message_id"]),
+                "group_id": row["group_id_b64"],
+                "sender_user_id": str(row["sender_user_id"]),
+                "sender_username": row["sender_username"],
+                "sender_leaf_index": row["sender_leaf_index"],
+                "epoch": row["epoch"],
+                "ciphertext": row["ciphertext_b64"],
+                "nonce": row["nonce_b64"],
+                "content_type": row["content_type"],
+                "message_generation": row["message_generation"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None
+            })
+        
+        return {"messages": messages, "count": len(messages)}
     
 @app.post("/groups/{group_id}/welcome")
 async def store_welcome(
@@ -969,12 +992,12 @@ async def get_pending_welcomes(token: str = Depends(oauth2_scheme)):
         ]
     }
     
+# Update the send_message endpoint
 @app.post("/messages")
 async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)):
-    """Store an encrypted message"""
+    """Store an encrypted message with generation number and leaf index"""
     user_id = verify_token(token)
     
-    # Decode data
     group_id_bytes = base64.b64decode(message.group_id)
     ciphertext_bytes = base64.b64decode(message.ciphertext)
     nonce_bytes = base64.b64decode(message.nonce)
@@ -984,10 +1007,19 @@ async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)
     async with db.connection() as conn:
         message_id = await conn.fetchval(
             """
-            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
-            group_id_bytes, user_id, message.epoch, ciphertext_bytes, nonce_bytes,
-            message.content_type, auth_data, enc_sender, message.wire_format
+            group_id_bytes, 
+            user_id, 
+            message.epoch, 
+            ciphertext_bytes, 
+            nonce_bytes,
+            message.content_type, 
+            auth_data, 
+            enc_sender, 
+            message.wire_format,
+            message.message_generation,
+            message.sender_leaf_index  # ← NEW PARAMETER
         )
     
     return {
