@@ -53,7 +53,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
-        self.user_sessions: Dict[str, str] = {}  # user_id -> websocket client
+        self.user_sessions: Dict[str, str] = {}
     
     async def connect(self, websocket: WebSocket, user_id: str):
         await websocket.accept()
@@ -66,35 +66,54 @@ class ConnectionManager:
             print(f"❌ WebSocket disconnected: {user_id}")
     
     async def send_to_user(self, user_id: str, message: dict):
+        print(f"📤 Attempting to send to user {user_id}")
+        print(f"   Active connections: {list(self.active_connections.keys())}")
+        
         if user_id in self.active_connections:
             try:
                 await self.active_connections[user_id].send_json(message)
+                print(f"✅ Successfully sent to {user_id}")
                 return True
-            except:
+            except Exception as e:
+                print(f"❌ Failed to send to {user_id}: {e}")
                 self.disconnect(user_id)
+        else:
+            print(f"⚠️ User {user_id} not in active connections")
         return False
     
-    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str = None):
-        # You need to implement group membership lookup
-        # For now, broadcast to all
-        for user_id, connection in self.active_connections.items():
-            if user_id != exclude_user:
-                try:
-                    await connection.send_json(message)
-                except:
-                    pass
-
-    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str = None):
-        # Get group members from database
-        async with db.connection() as conn:
-            rows = await conn.fetch(
-                "SELECT user_id FROM group_members WHERE group_id = decode($1, 'base64')",
-                group_id
-            )
-            for row in rows:
-                user_id = str(row["user_id"])
-                if user_id != exclude_user:
-                    await self.send_to_user(user_id, message)
+    async def broadcast_to_group(self, group_id_b64: str, message: dict, exclude_user: str = None):
+        """Broadcast message to all members of a group"""
+        try:
+            # Handle special "all" group (broadcast to all connected users)
+            if group_id_b64 == "all":
+                for user_id, connection in self.active_connections.items():
+                    if user_id != exclude_user:
+                        try:
+                            await connection.send_json(message)
+                        except:
+                            pass
+                return
+            
+            # Normal group broadcast
+            group_id_bytes = base64.b64decode(group_id_b64)
+            async with db.connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT user_id FROM group_members WHERE group_id = $1 AND is_active = TRUE",
+                    group_id_bytes
+                )
+                print(f"📡 Broadcasting to group, found {len(rows)} members")
+                for row in rows:
+                    user_id = str(row["user_id"])
+                    if user_id != exclude_user and user_id in self.active_connections:
+                        try:
+                            await self.active_connections[user_id].send_json(message)
+                            print(f"   ✅ Sent to {user_id[:8]}...")
+                        except Exception as e:
+                            print(f"   ❌ Failed to send to {user_id[:8]}...: {e}")
+        except Exception as e:
+            print(f"❌ Broadcast error: {e}")
+            import traceback
+            traceback.print_exc()
 
 class GroupUpdateNotification(BaseModel):
     group_id: str
@@ -123,6 +142,16 @@ class GroupResponse(BaseModel):
 class AddMemberRequest(BaseModel):
     user_id: str
     leaf_index: int
+
+class MessageSend(BaseModel):
+    group_id: str
+    ciphertext: str  # base64 encoded
+    nonce: str       # base64 encoded
+    epoch: int
+    content_type: int
+    authenticated_data: Optional[str] = None
+    encrypted_sender_data: Optional[str] = None
+    wire_format: int
 
 class MessageResponse(BaseModel):
     message_id: str
@@ -161,96 +190,150 @@ class MemberUpdateNotification(BaseModel):
 
 manager = ConnectionManager()
 
-class MessageSend(BaseModel):
-    group_id: str
-    ciphertext: str
-    nonce: str
-    epoch: int
-    content_type: int
-    authenticated_data: Optional[str] = None
-    encrypted_sender_data: Optional[str] = None
-    wire_format: int
-    message_generation: int = 0  
-    sender_leaf_index: int
 
 @app.post("/api/notify-join-request")
 async def notify_join_request(notification: JoinRequestNotification):
     """Notify group creator about join request"""
     
     print(f"📢 Join request from {notification.requester_username} for group {notification.group_name}")
+    print(f"   Creator ID: {notification.creator_id}")
+    print(f"   Active connections: {list(manager.active_connections.keys())}")
     
     if notification.creator_id in manager.active_connections:
-        await manager.send_to_user(notification.creator_id, {
+        print(f"   ✅ Creator is online, sending notification...")
+        
+        # Create the message
+        ws_message = {
             'type': 'join_request',
             'requester_id': notification.requester_id,
             'requester_username': notification.requester_username,
             'group_id': notification.group_id,
             'group_name': notification.group_name
-        })
-        print(f"✅ Notified creator {notification.creator_id}")
-        return {"status": "notified"}
+        }
+        
+        print(f"   Message: {ws_message}")
+        
+        # Send directly to verify
+        try:
+            await manager.active_connections[notification.creator_id].send_json(ws_message)
+            print(f"✅ Notified creator {notification.creator_id}")
+            return {"status": "notified"}
+        except Exception as e:
+            print(f"❌ Direct send failed: {e}")
+            return {"status": "send_failed"}
     else:
         print(f"⚠️ Creator {notification.creator_id} not connected")
+        print(f"   Connected users: {list(manager.active_connections.keys())}")
         return {"status": "creator_offline"}
 
 # WebSocket endpoint  
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
-    # Optional: verify token from query params
-    token = websocket.query_params.get("token")
+    username = websocket.query_params.get("username", "Unknown")
     
-    # Verify token here if needed
-    # try:
-    #     payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    #     if payload["user_id"] != user_id:
-    #         await websocket.close(code=4001)
-    #         return
-    # except:
-    #     await websocket.close(code=4001)
-    #     return
+    print(f"🔌 WebSocket connection attempt from {username} ({user_id})")
     
     await manager.connect(websocket, user_id)
+    print(f"✅ WebSocket connected for {username}")
     
     try:
         while True:
-            data = await websocket.receive_text()
+            # Add timeout to detect hangs
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
             message = json.loads(data)
             msg_type = message.get("type")
             
             if msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
+                print(f"💓 Ping from {user_id}")
+            
+            elif msg_type == "new_message_notification":
+                group_id_b64 = message.get("group_id_b64")
+                sender_username = message.get("sender_username")
+                
+                # Just notify others to refresh messages
+                await manager.broadcast_to_group(
+                    group_id_b64,
+                    {
+                        "type": "refresh_messages",
+                        "group_id_b64": group_id_b64,
+                        "sender_username": sender_username
+                    },
+                    exclude_user=user_id
+                )
+            elif msg_type == "send_message":
+                # Extract message data (format from frontend)
+                group_id_b64 = message.get("group_id_b64")
+                ciphertext = message.get("ciphertext")
+                nonce = message.get("nonce")
+                epoch = message.get("epoch")
+                sender_username = message.get("sender_username")
+                sender_leaf_index = message.get("sender_leaf_index")
+                message_generation = message.get("message_generation", 0)
+                
+                print(f"📨 Received send_message from {sender_username} to group {group_id_b64[:8]}...")
+                
+                # Store in database (for offline users)
+                try:
+                    group_id_bytes = base64.b64decode(group_id_b64)
+                    ciphertext_bytes = base64.b64decode(ciphertext)
+                    nonce_bytes = base64.b64decode(nonce)
+                    
+                    async with db.connection() as conn:
+                        await conn.fetchval(
+                            """
+                            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            """,
+                            group_id_bytes, user_id, epoch, ciphertext_bytes, nonce_bytes,
+                            1, b'', b'', 2
+                        )
+                    print(f"💾 Message stored in database")
+                except Exception as e:
+                    print(f"❌ Failed to store message: {e}")
+                
+                # Broadcast to all group members in real-time
+                await manager.broadcast_to_group(
+                    group_id_b64,
+                    {
+                        "type": "new_message",
+                        "group_id_b64": group_id_b64,
+                        "sender_user_id": user_id,
+                        "sender_username": sender_username,
+                        "ciphertext": ciphertext,
+                        "nonce": nonce,
+                        "epoch": epoch,
+                        "sender_leaf_index": sender_leaf_index,
+                        "message_generation": message_generation
+                    },
+                    exclude_user=user_id
+                )
+                print(f"📡 Broadcasted message to group {group_id_b64[:8]}...")
+                
+                # Send confirmation back to sender
+                await websocket.send_json({
+                    "type": "message_sent",
+                    "success": True,
+                    "message_id": "stored"
+                })
             
             elif msg_type == "join_group":
                 group_id = message.get("group_id")
-                # Store group membership (optional)
                 print(f"User {user_id} joined group room: {group_id}")
                 await websocket.send_json({"type": "joined", "group_id": group_id})
             
-            elif msg_type == "new_message":
-                group_id = message.get("group_id")
-                # Broadcast to group members (you need to implement group member lookup)
-                # For now, broadcast to all connected users
-                await manager.broadcast_to_group(group_id, {
-                    "type": "new_message",
-                    "group_id": group_id,
-                    "sender": user_id,
-                    "message": message.get("message")
-                }, exclude_user=user_id)
-            
-            elif msg_type == "user_online_check":
-                # Return list of online users
+            elif msg_type == "get_online_users":
                 online_users = list(manager.active_connections.keys())
                 await websocket.send_json({
                     "type": "online_users",
                     "users": online_users
                 })
-                
+    
     except WebSocketDisconnect:
         manager.disconnect(user_id)
-        # Notify others
         await manager.broadcast_to_group("all", {
             "type": "user_offline",
-            "user_id": user_id
+            "user_id": user_id,
+            "username": username
         })
 
 @app.post("/api/notify-new-user")
@@ -770,36 +853,28 @@ def verify_token(token: str) -> str:
         return payload["user_id"]
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
+
 @app.get("/groups/{group_id}/messages")
 async def get_group_messages(
     group_id: str,
-    since_epoch: Optional[int] = None,
+    since_epoch: Optional[int] = None,  # ← Already there
+    since_message_id: Optional[str] = None,
     limit: int = 100,
     token: str = Depends(oauth2_scheme)
 ):
-    """Get messages for a group with optional epoch filter"""
+    """Get messages - optionally since a specific message ID"""
     print(f"\n=== get_group_messages called ===")
     print(f"group_id: {group_id}")
     print(f"since_epoch: {since_epoch}")
-    print(f"limit: {limit}")
+    print(f"since_message_id: {since_message_id}")
     
-    # Verify token
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload["user_id"]
-        print(f"user_id from token: {user_id}")
-    except Exception as e:
-        print(f"Token error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token")
+    user_id = verify_token(token)
     
-    # Decode group_id (hex format from URL)
+    # Decode group_id
     try:
         group_id_bytes = bytes.fromhex(group_id)
-        print(f"Decoded group_id bytes: {group_id_bytes.hex()}")
-        print(f"Decoded group_id length: {len(group_id_bytes)} bytes")
-    except Exception as e:
-        print(f"Hex decode error: {e}")
+    except:
         raise HTTPException(status_code=400, detail="Invalid group_id format")
     
     async with db.connection() as conn:
@@ -812,9 +887,9 @@ async def get_group_messages(
         if not is_member:
             raise HTTPException(status_code=403, detail="Not a group member")
         
-        # Build query based on since_epoch
-        if since_epoch is None:
-            # Get all messages
+        # Build query based on since_message_id
+        if since_message_id:
+            # Get messages after the specified message ID
             rows = await conn.fetch(
                 """
                 SELECT 
@@ -827,22 +902,20 @@ async def get_group_messages(
                     encode(m.ciphertext, 'base64') as ciphertext_b64,
                     encode(m.nonce, 'base64') as nonce_b64,
                     m.content_type,
-                    m.message_generation,
                     m.created_at
                 FROM messages m
                 JOIN users u ON m.sender_user_id = u.user_id
                 WHERE m.group_id = $1 
-                    AND m.sender_user_id IN (
-                        SELECT user_id FROM group_members 
-                        WHERE group_id = $1 AND is_active = TRUE
-                    )
+                    AND m.created_at > (SELECT created_at FROM messages WHERE message_id = $2::UUID)
+                    AND m.epoch = $3
+                    AND m.sender_user_id != $4
                 ORDER BY m.created_at ASC
-                LIMIT $2
+                LIMIT $5
                 """,
-                group_id_bytes, limit
+                group_id_bytes, since_message_id, since_epoch, user_id, limit
             )
         else:
-            # Get messages from specific epoch onwards
+            # First load - get recent messages (excluding user's own messages)
             rows = await conn.fetch(
                 """
                 SELECT 
@@ -855,23 +928,17 @@ async def get_group_messages(
                     encode(m.ciphertext, 'base64') as ciphertext_b64,
                     encode(m.nonce, 'base64') as nonce_b64,
                     m.content_type,
-                    m.message_generation,
                     m.created_at
                 FROM messages m
                 JOIN users u ON m.sender_user_id = u.user_id
-                WHERE m.group_id = $1 
-                    AND m.epoch >= $2
-                    AND m.sender_user_id IN (
-                        SELECT user_id FROM group_members 
-                        WHERE group_id = $1 AND is_active = TRUE
-                    )
+                WHERE m.group_id = $1
+                    AND m.epoch = $2 
+                    AND m.sender_user_id != $3
                 ORDER BY m.created_at ASC
-                LIMIT $3
+                LIMIT $4
                 """,
-                group_id_bytes, since_epoch, limit
+                group_id_bytes, since_epoch, user_id, limit
             )
-        
-        print(f"Query returned {len(rows)} rows")
         
         messages = []
         for row in rows:
@@ -885,8 +952,7 @@ async def get_group_messages(
                 "ciphertext": row["ciphertext_b64"],
                 "nonce": row["nonce_b64"],
                 "content_type": row["content_type"],
-                "message_generation": row["message_generation"],
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None
+                "created_at": row["created_at"].isoformat()
             })
         
         return {"messages": messages, "count": len(messages)}
@@ -992,12 +1058,12 @@ async def get_pending_welcomes(token: str = Depends(oauth2_scheme)):
         ]
     }
     
-# Update the send_message endpoint
 @app.post("/messages")
 async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)):
-    """Store an encrypted message with generation number and leaf index"""
+    """Store an encrypted message"""
     user_id = verify_token(token)
     
+    # Decode data
     group_id_bytes = base64.b64decode(message.group_id)
     ciphertext_bytes = base64.b64decode(message.ciphertext)
     nonce_bytes = base64.b64decode(message.nonce)
@@ -1007,19 +1073,10 @@ async def send_message(message: MessageSend, token: str = Depends(oauth2_scheme)
     async with db.connection() as conn:
         message_id = await conn.fetchval(
             """
-            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            SELECT store_message($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
-            group_id_bytes, 
-            user_id, 
-            message.epoch, 
-            ciphertext_bytes, 
-            nonce_bytes,
-            message.content_type, 
-            auth_data, 
-            enc_sender, 
-            message.wire_format,
-            message.message_generation,
-            message.sender_leaf_index  # ← NEW PARAMETER
+            group_id_bytes, user_id, message.epoch, ciphertext_bytes, nonce_bytes,
+            message.content_type, auth_data, enc_sender, message.wire_format
         )
     
     return {
