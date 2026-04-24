@@ -594,27 +594,6 @@ async def upload_keypackage(user_id: UUID, key_package: bytes = Body(...)):
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-
-@app.get("/key_packages/{user_id}/latest")
-async def get_latest_unused_keypackage(user_id: UUID):
-    """
-    Get the latest unused, non-expired KeyPackage for a user.
-    Returns raw binary data.
-    """
-    async with db.connection() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM get_latest_unused_key_package($1)",
-            str(user_id)
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="No unused KeyPackage found")
-
-        return Response(
-            content=row["key_package"],
-            media_type="application/octet-stream",
-            headers={"X-Ref-Hash": row["ref_hash"].hex()}
-        )
-
 @app.post("/cleanup")
 async def cleanup_expired_packages():
     """
@@ -1174,3 +1153,135 @@ async def mark_welcome_delivered(welcome_id: UUID, token: str = Depends(oauth2_s
             "group_id": group_id,
             "epochs": [row["epoch"] for row in rows]
         }
+class KeyPackageRequest(BaseModel):
+    user_ids: List[str]
+
+@app.get("/key_packages/batch")
+async def get_batch_latest_keypackages(
+    user_ids: str,  # Comma-separated list: "id1,id2,id3"
+    token: str = Depends(oauth2_scheme)
+):
+    """Get latest key packages for multiple users in one GET request"""
+    user_id = verify_token(token)
+    
+    # Parse comma-separated user_ids
+    user_id_list = user_ids.split(",")
+    print(f"📦 Batch request for users: {user_id_list}")
+    
+    result = {}
+    async with db.connection() as conn:
+        for target_user_id in user_id_list:
+            row = await conn.fetchrow(
+                "SELECT * FROM get_latest_unused_key_package($1)",
+                target_user_id
+            )
+            if row:
+                result[target_user_id] = {
+                    "key_package": base64.b64encode(row["key_package"]).decode('ascii'),
+                    "ref_hash": row["ref_hash"].hex()
+                }
+            else:
+                result[target_user_id] = None
+    
+    return {"key_packages": result}
+
+
+@app.get("/key_packages/{user_id}/latest")
+async def get_latest_unused_keypackage(user_id: UUID):
+    """Get the latest unused, non-expired KeyPackage for a user."""
+    async with db.connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM get_latest_unused_key_package($1)",
+            str(user_id)
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="No unused KeyPackage found")
+
+        return Response(
+            content=row["key_package"],
+            media_type="application/octet-stream",
+            headers={"X-Ref-Hash": row["ref_hash"].hex()}
+        )
+
+class BatchAddMemberRequest(BaseModel):
+    members: List[dict]  # [{"user_id": "xxx", "leaf_index": 1}, ...]
+
+@app.post("/groups/{group_id}/members/batch")
+async def add_group_members_batch(
+    group_id: str,
+    request: BatchAddMemberRequest,
+    token: str = Depends(oauth2_scheme)
+):
+    """Add multiple members to a group in one transaction"""
+    user_id = verify_token(token)
+    
+    # Decode group_id
+    try:
+        if len(group_id) == 32:
+            group_id_bytes = bytes.fromhex(group_id)
+        else:
+            group_id_bytes = base64.b64decode(group_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid group_id format")
+    
+    async with db.connection() as conn:
+        async with conn.transaction():
+            for member in request.members:
+                await conn.fetchval(
+                    "SELECT add_group_member($1, $2, $3, $4)",
+                    group_id_bytes, member["user_id"], member["leaf_index"], user_id
+                )
+    
+    return {"status": "members_added", "count": len(request.members)}
+
+class BatchWelcomeRequest(BaseModel):
+    welcomes: List[dict]  # [{"to_user_id": "xxx", "welcome_b64": "base64..."}, ...]
+
+@app.post("/groups/{group_id}/welcome/batch")
+async def store_welcome_batch(
+    group_id: str,
+    request: BatchWelcomeRequest,
+    token: str = Depends(oauth2_scheme)
+):
+    """Store multiple welcome messages in one request"""
+    user_id = verify_token(token)
+    
+    # Decode group_id
+    try:
+        if len(group_id) == 32:
+            group_id_bytes = bytes.fromhex(group_id)
+        else:
+            group_id_bytes = base64.b64decode(group_id)
+    except Exception:
+        raise HTTPException(400, "Invalid group_id format")
+    
+    # Verify caller is a member
+    async with db.connection() as conn:
+        is_member = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)",
+            group_id_bytes, user_id
+        )
+        if not is_member:
+            raise HTTPException(403, "Not a member of this group")
+    
+    # Insert all welcomes in a transaction
+    async with db.connection() as conn:
+        async with conn.transaction():
+            for welcome_data in request.welcomes:
+                to_user_id = UUID(welcome_data["to_user_id"])
+                welcome_bytes = base64.b64decode(welcome_data["welcome_b64"])
+                
+                await conn.execute(
+                    """
+                    INSERT INTO pending_welcomes (group_id, to_user_id, welcome)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (group_id, to_user_id) 
+                    DO UPDATE SET
+                        welcome = EXCLUDED.welcome,
+                        created_at = NOW(),
+                        delivered = FALSE
+                    """,
+                    group_id_bytes, to_user_id, welcome_bytes
+                )
+    
+    return {"status": "stored", "count": len(request.welcomes)}
