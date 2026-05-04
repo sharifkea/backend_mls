@@ -49,6 +49,19 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+import functools
+import time
+
+def timing_decorator(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = await func(*args, **kwargs)
+        end = time.perf_counter()
+        print(f"⏱️ {func.__name__} took {(end-start)*1000:.2f}ms")
+        return result
+    return wrapper
+
 # Connection manager for WebSocket
 class ConnectionManager:
     def __init__(self):
@@ -737,6 +750,7 @@ async def get_group_details_endpoint(
 
 
 @app.get("/groups/{group_id}/members")
+@timing_decorator
 async def get_group_members_endpoint(
     group_id: str,
     token: str = Depends(oauth2_scheme)
@@ -835,6 +849,7 @@ def verify_token(token: str) -> str:
 
 
 @app.get("/groups/{group_id}/messages")
+@timing_decorator
 async def get_group_messages(
     group_id: str,
     since_epoch: Optional[int] = None,  # ← Already there
@@ -937,6 +952,7 @@ async def get_group_messages(
         return {"messages": messages, "count": len(messages)}
     
 @app.post("/groups/{group_id}/welcome")
+@timing_decorator
 async def store_welcome(
     group_id: str,                      # this is base64 string from frontend
     payload: dict,

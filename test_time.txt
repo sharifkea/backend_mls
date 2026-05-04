@@ -1,0 +1,72 @@
+psql -U postgres -d mls_db
+
+EXPLAIN ANALYZE 
+SELECT * FROM messages 
+WHERE group_id = decode('AE214897AF81BF7EC1C58900DAE0C828', 'hex') 
+AND epoch >= 2 
+ORDER BY created_at;
+
+-- Analyze the get_group_messages query 
+EXPLAIN ANALYZE 
+SELECT 
+    m.message_id,
+    encode(m.group_id, 'base64') as group_id_b64,
+    m.sender_user_id,
+    u.username as sender_username,
+    m.sender_leaf_index,
+    m.epoch,
+    encode(m.ciphertext, 'base64') as ciphertext_b64,
+    encode(m.nonce, 'base64') as nonce_b64,
+    m.content_type,
+    m.created_at
+FROM messages m
+JOIN users u ON m.sender_user_id = u.user_id
+WHERE m.group_id = decode('AE214897AF81BF7EC1C58900DAE0C828', 'hex')
+    AND m.epoch >= 0
+ORDER BY m.created_at ASC
+LIMIT 50;
+
+--results
+                                                          QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=2.98..2.99 rows=1 width=158) (actual time=0.073..0.075 rows=14 loops=1)
+   ->  Sort  (cost=2.98..2.99 rows=1 width=158) (actual time=0.072..0.073 rows=14 loops=1)
+         Sort Key: m.created_at
+         Sort Method: quicksort  Memory: 28kB
+         ->  Hash Join  (cost=1.10..2.97 rows=1 width=158) (actual time=0.040..0.048 rows=14 loops=1)
+               Hash Cond: (u.user_id = m.sender_user_id)
+               ->  Seq Scan on users u  (cost=0.00..1.62 rows=62 width=26) (actual time=0.010..0.011 rows=5 loops=1)
+               ->  Hash  (cost=1.09..1.09 rows=1 width=139) (actual time=0.018..0.018 rows=14 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 11kB
+                     ->  Seq Scan on messages m  (cost=0.00..1.09 rows=1 width=139) (actual time=0.007..0.009 rows=14 loops=1)
+                           Filter: ((epoch >= 0) AND (group_id = '\xae214897af81bf7ec1c58900dae0c828'::bytea))
+ Planning Time: 1.940 ms
+ Execution Time: 0.106 ms
+(13 rows)
+
+-- See if indexes are being used
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT * FROM messages WHERE group_id = decode('AE214897AF81BF7EC1C58900DAE0C828', 'hex');
+
+EXPLAIN ANALYZE SELECT * FROM messages LIMIT 100;
+--results
+
+mls_db=# EXPLAIN ANALYZE SELECT * FROM messages LIMIT 100;
+                                                QUERY PLAN
+-----------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.00..1.06 rows=6 width=158) (actual time=0.020..0.025 rows=14 loops=1)
+   ->  Seq Scan on messages  (cost=0.00..1.06 rows=6 width=158) (actual time=0.018..0.022 rows=14 loops=1)
+ Planning Time: 3.468 ms
+ Execution Time: 0.131 ms
+(4 rows)
+
+
+Time: 4,190 ms
+mls_db=# EXPLAIN ANALYZE SELECT * FROM messages LIMIT 100;
+                                                QUERY PLAN
+-----------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.00..1.06 rows=6 width=158) (actual time=0.017..0.022 rows=14 loops=1)
+   ->  Seq Scan on messages  (cost=0.00..1.06 rows=6 width=158) (actual time=0.015..0.019 rows=14 loops=1)
+ Planning Time: 0.095 ms
+ Execution Time: 0.039 ms
+(4 rows)
