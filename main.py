@@ -127,6 +127,11 @@ class ConnectionManager:
             print(f"❌ Broadcast error: {e}")
             import traceback
             traceback.print_exc()
+            
+class BatchMemberUpdateNotification(BaseModel):
+    user_ids: List[str]  # List of member IDs to notify
+    group_id: str
+    update_data: dict
 
 class GroupUpdateNotification(BaseModel):
     group_id: str
@@ -384,6 +389,40 @@ async def notify_member_update(notification: MemberUpdateNotification):
     else:
         print(f"⚠️ Member {notification.user_id} not connected (offline)")
         return {"status": "offline"}
+
+
+@app.post("/api/notify-group-update-batch")
+async def notify_members_batch(notification: BatchMemberUpdateNotification):
+    """Notify multiple members about group update in one request"""
+    
+    print(f"📢 Batch notifying {len(notification.user_ids)} members")
+    print(f"   Group: {notification.group_id}")
+    
+    notified_count = 0
+    offline_count = 0
+    
+    for user_id in notification.user_ids:
+        if user_id in manager.active_connections:
+            try:
+                await manager.send_to_user(user_id, {
+                    'type': 'group_update',
+                    'group_id': notification.group_id,
+                    'update_data': notification.update_data
+                })
+                notified_count += 1
+            except Exception as e:
+                print(f"   ❌ Failed to notify {user_id}: {e}")
+        else:
+            offline_count += 1
+    
+    print(f"✅ Batch notification complete: {notified_count} notified, {offline_count} offline")
+    
+    return {
+        "status": "completed",
+        "notified": notified_count,
+        "offline": offline_count,
+        "total": len(notification.user_ids)
+    }
     
 @app.on_event("startup")
 async def startup():
