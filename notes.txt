@@ -40,126 +40,99 @@ git push -u origin main
 
 
 
+# usre menegment and authentication
+@app.post("/users")
+@app.get("/users")
+@app.get("/users/{user_id}")
+@app.get("/users/me/groups")
+@app.post("/login")
+@app.post("/key_packages/{user_id}")
+@app.get("/key_packages/{user_id}/latest")
+@app.delete("/users/{user_id}")
 
-curl -X POST "http://localhost:8000/users" -H "Content-Type: application/json" -d '{"username": "alice", "password": "secret"}'
+#key_packages endpoints
+@app.post("/key_packages/mark-used")
+@app.get("/key_packages/batch")
+@app.post("/cleanup")
 
-username="bob"
-password="1234"
+#Group management endpoints
+@app.post("/groups")
+@app.post("/groups/{group_id}/welcome/batch")
+@app.post("/groups/{group_id}/members/batch")
+@app.get("/api/groups/search")
+@app.post("/groups/{group_id}/welcome")
+@app.get("/groups/{group_id}/messages")
+@app.post("/groups/{group_id}/epoch")
+@app.get("/groups/{group_id}/members")
+@app.get("/groups/{group_id}")
+@app.post("/groups/{group_id}/members")
 
-#1. Register and login users
-user_id = test_user_registration(username, password)
-user_id, user_token = return test_user_login(username, password)
+# Wellcome message management endpoints
+@app.post("/welcome/{welcome_id}/delivered")
+@app.get("/pending-welcomes")
 
-# 2. Generate and upload key packages
-user_priv, user_kp = GeneratKeyPackage(username) # Generating PackageKey
-ref_hash_user, kp_id_user = test_upload_keypackage(user_id, user_kp) #saving packageKey to DB
+# WebSocket endpoint 
+@app.websocket("/ws/{user_id}")
+@app.post("/api/notify-new-user")
+@app.post("/api/notify-group-update")
+@app.post("/api/notify-group-update-batch")
+@app.post("/api/notify-join-request")
 
-# 3. User creates group
-user_kp_bytes = test_get_latest_keypackage(user_id) # Getting users latest keypackage in user_kp_bytes
-user_kp_obj = KeyPackage.deserialize(bytearray(user_kp_bytes)) # Creating user keypackage object  
-group = create_empty_group(bob_kp_obj.content.leaf_node, username) # user is creating an empty group
-create_response = test_create_group_with_id("MLS Test Group", 1, user_token, group['group_id_b64']) # Saving group information to DB
+# Message
+@app.post("/messages")
 
-# 4. Bob adds Alice to group as Bob created the group and Alice is registered
-add_member(group, alice_id, bob_priv) 
-test_add_group_member(group['group_id_b64'], alice_id, 1, bob_token) # Add member to database (in group)    
-test_update_group_epoch(group['group_id_b64'], group['epoch'], bob_token, group['epoch_secret']) # Updateing epoch in DB
+# Helper function
+def verify_token(token: str)
 
-# 5. Sending message (Bob sending)
-bob_msg, bob_nonce = send_encrypted_message( group,
-     0, # Senders leaf node index
-     "The message", 
-     group["epoch_secret"]
-) # Encrypting the message group epoch secret
+#test endpoint to check database connectivity
+@app.get("/test-db")
 
-bob_msg_id = test_send_message(
-    group['group_id_b64'],
-    bob_msg.msg_content.ciphertext.data,
-    bob_nonce,
-    group['epoch'],
-    1,
-    bob_token
-) # Bob saves his message to database
-
-# 6. Receiving message (Alice receiving)
-messages_response = test_get_group_messages(group['group_id_b64'], alice_token) # Receives encrypted message from DB
-messages = messages_response['messages'] # getting message from messages_response
-for i, msg_data in enumerate(messages):
-    # Decode base64 data
-    ciphertext = base64.b64decode(msg_data['ciphertext'])
-    nonce = base64.b64decode(msg_data['nonce'])
-    sender_idx = msg_data['sender_leaf_index']
-    if i == 0 and sender_idx == 0:  # Bob's message
-        decrypted = receive_encrypted_message(
-            group, 
-            bob_msg,  # In reality, this would be reconstructed from DB
-            nonce, 
-            sender_idx, 
-            group["epoch_secret"]
-        )
-         print(f"Alice read: '{decrypted}'")
+#endpoints not been called from Client Side
+GET /users
+GET /users/{user_id}
+DELETE /users/{user_id}
+POST /key_packages/mark-used
+POST /cleanup
+GET /test-db
 
 
 
-for i, msg_data in enumerate(messages):
-            print(f"\n--- Processing message {i+1} ---")
-            print(f"   From sender leaf: {msg_data['sender_leaf_index']}")
-            print(f"   Epoch: {msg_data['epoch']}")
-            print(f"   Created at: {msg_data['created_at']}")
-            
-            # Reconstruct message from database data
-            # In a real implementation, you'd need to reconstruct the MLSMessage object
-            # For testing, we'll simulate by creating a mock message
-            
-            # Decode base64 data
-            ciphertext = base64.b64decode(msg_data['ciphertext'])
-            nonce = base64.b64decode(msg_data['nonce'])
-            sender_idx = msg_data['sender_leaf_index']
-            
-            print(f"   Ciphertext size: {len(ciphertext)} bytes")
-            print(f"   Nonce: {nonce.hex()}")
-            
-            # For proper MLSMessage reconstruction, you'd need to:
-            # 1. Create a PrivateMessage object from the DB fields
-            # 2. Wrap it in an MLSMessage
-            
-            # SIMPLIFIED: We'll use the original message objects we have in memory
-            # In a real distributed system, you'd reconstruct properly
-            if i == 0 and sender_idx == 0:  # Bob's message
-                print("   📬 Alice decrypting Bob's message...")
-                # Use the original bob_msg we have in memory
-                # In reality, Alice would reconstruct from DB data
-                decrypted = receive_encrypted_message(
-                    group, 
-                    bob_msg,  # In reality, this would be reconstructed from DB
-                    nonce, 
-                    sender_idx, 
-                    group["epoch_secret"]
-                )
-                if decrypted:
-                    print(f"   ✅ Alice read: '{decrypted}'")
+# SQL functions
+add_group_member (p_group_id bytea, p_user_id uuid, p_leaf_index integer, p_adder_user_id uuid)
+cleanup_old_key_packages
+create_group (p_group_id bytea, p_group_name text, p_creator_user_id uuid, p_cipher_suite integer)
+delete_group (p_group_id bytea, p_user_id uuid)
+get_epoch_secret (p_group_id bytea, p_epoch integer, p_user_id uuid)
+get_group_details (p_group_id bytea)
+get_group_messages (p_group_id bytea, p_user_id uuid, p_since_epoch integer, p_limit integer)
+get_latest_unused_key_package (p_user_id uuid)
+get_undelivered_messages (p_user_id uuid)
+get_user_groups (p_user_id uuid)
+insert_key_package (p_user_id uuid, p_key_package bytea, p_ref_hash bytea, timestamp with)
+mark_key_package_used (p_ref_hash bytea)
+mark_messages_delivered (p_group_id bytea, p_user_id uuid, p_message_ids uuid[])
+remove_group_member (p_group_id bytea, p_user_id uuid, p_remover_user_id uuid)
+store_epoch_secret (p_group_id bytea, p_user_id uuid, p_epoch integer, p_epoch_secret bytea)
+update_group_epoch (p_group_id bytea, p_new_epoch integer, p_user_id uuid)
+store_message(p_group_id bytea, p_sender_user_id uuid, p_epoch integer, p_ciphertext bytea, p_nonce bytea, p_content_type integer, p_authenticated_data bytea DEFAULT '\x'::bytea, p_encrypted_sender_data bytea DEFAULT '\x'::bytea, p_wire_format integer DEFAULT 1)
 
+# SQL functions not been used
+cleanup_old_key_packages
+delete_group
+get_epoch_secret
+get_group_messages
+get_undelivered_messages
+get_user_groups
+mark_key_package_used
+mark_messages_delivered
+remove_group_member
+store_epoch_secret
 
-
-                    FAFF1AD9F481DB1DB678066FD16704B0
-                    70883F48413FFCF007FB677F20B92129D3E3028AF56DEFE527D76124B1931E08
-                    /welcome/a800154e-2584-4757-ba4a-11c560de7de3/delivered
-
-# for this we first need to calculate the Welcome Key and Nonce     
-    welcome_key = DeriveSecret(cipher_suite, welcomesecret, b"welcome")
-    welcome_nonce = DeriveSecret(cipher_suite, welcomesecret, b"welcome nonce")
-    # then we can encrypt the GroupInfo with these  
-    encrypted_group_info = EncryptWithLabel(
-        cipher_suite,
-        welcome_key,
-        welcome_nonce,
-        b"MLS 1.0 Welcome",
-        gi.serialize(),
-    ).encrypt()
-    bobs_welcome = Welcome(cipher_suite, encrypted_group_info)  
-    print("Alice sends the Commit and the Welcome to Bob")
-    # we serialize the commit message and the welcome message to simulate sending them over the network 
-    commit_msg_serialized = commit_msg.serialize()
-    welcome_msg_serialized = bobs_welcome.serialize()  
-
-    leaf_node
+#functions in use
+add_group_member (p_group_id bytea, p_user_id uuid, p_leaf_index integer, p_adder_user_id uuid)
+create_group (p_group_id bytea, p_group_name text, p_creator_user_id uuid, p_cipher_suite integer)
+get_group_details (p_group_id bytea)
+get_latest_unused_key_package (p_user_id uuid)
+insert_key_package (p_user_id uuid, p_key_package bytea, p_ref_hash bytea, timestamp with)
+store_message(p_group_id bytea, p_sender_user_id uuid, p_epoch integer, p_ciphertext bytea, p_nonce bytea, p_content_type integer, p_authenticated_data bytea DEFAULT '\x'::bytea, p_encrypted_sender_data bytea DEFAULT '\x'::bytea, p_wire_format integer DEFAULT 1)
+update_group_epoch (p_group_id bytea, p_new_epoch integer, p_user_id uuid)
